@@ -16,6 +16,7 @@ import { loadConfig, Config } from '../config';
 import { WalletManager } from '../wallet';
 import { DirectMinter, OpenSeaMinter, parseMintLink, ParsedMintInfo, MintResult, ContractInfo } from '../mint';
 import { AutoLister, ListResult } from '../listing';
+import { MintScheduler, MintScheduleInfo, ScheduledMintJob } from '../scheduler';
 import { shortAddress, shortTxHash, truncate, isValidAddress } from '../utils';
 
 // ============================================================
@@ -183,6 +184,81 @@ export const SKILL_DEFINITION = {
         required: ['tx_hash'],
       },
     },
+    {
+      name: 'get_mint_schedule',
+      description: 'Baca jadwal minting on-chain dari smart contract (Seadrop: public/allowlist start & end time, harga, max per wallet). Berguna untuk mengetahui kapan minting dimulai dan berakhir. Untuk contract Seadrop/OpenSea, jadwal bisa dibaca otomatis.',
+      parameters: {
+        type: 'object',
+        properties: {
+          contract_address: {
+            type: 'string',
+            description: 'Contract address NFT (0x...)',
+          },
+        },
+        required: ['contract_address'],
+      },
+    },
+    {
+      name: 'schedule_mint',
+      description: 'Jadwalkan auto-minting di waktu tertentu. Agent akan otomatis mint saat waktunya tiba. PENTING: Ini hanya berfungsi untuk PUBLIC mint. Untuk WL/allowlist mint, proof dibutuhkan dan harus mint manual di OpenSea. Setelah schedule, gunakan list_scheduled_mints untuk monitoring.',
+      parameters: {
+        type: 'object',
+        properties: {
+          contract_address: {
+            type: 'string',
+            description: 'Contract address NFT yang mau di-mint',
+          },
+          mint_price_eth: {
+            type: 'string',
+            description: 'Harga mint per NFT dalam ETH',
+          },
+          quantity_per_wallet: {
+            type: 'number',
+            description: 'Jumlah NFT per wallet (default: 1)',
+          },
+          wallet_indices: {
+            type: 'array',
+            items: { type: 'number' },
+            description: 'Index wallet yang dipakai. Kosongkan = semua wallet.',
+          },
+          scheduled_time: {
+            type: 'string',
+            description: 'Waktu eksekusi dalam ISO 8601 format (contoh: "2025-06-01T18:00:00Z") atau Unix timestamp dalam milidetik. Agent juga bisa baca dari jadwal on-chain via get_mint_schedule.',
+          },
+          concurrent: {
+            type: 'number',
+            description: 'Jumlah wallet yang mint bersamaan (default: 3)',
+          },
+          mint_function: {
+            type: 'string',
+            description: 'Override mint function signature. Kosongkan = auto-detect.',
+          },
+        },
+        required: ['contract_address', 'mint_price_eth', 'scheduled_time'],
+      },
+    },
+    {
+      name: 'list_scheduled_mints',
+      description: 'Lihat semua minting yang sudah dijadwalkan. Berguna untuk monitoring dan memastikan schedule benar sebelum waktunya tiba.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'cancel_scheduled_mint',
+      description: 'Batalkan minting yang sudah dijadwalkan. Hanya bisa membatalkan job yang statusnya "pending".',
+      parameters: {
+        type: 'object',
+        properties: {
+          job_id: {
+            type: 'string',
+            description: 'ID job yang mau dibatalkan (dari list_scheduled_mints)',
+          },
+        },
+        required: ['job_id'],
+      },
+    },
   ],
 };
 
@@ -196,6 +272,7 @@ let walletManager: WalletManager;
 let directMinter: DirectMinter;
 let openSeaMinter: OpenSeaMinter;
 let autoLister: AutoLister;
+let mintScheduler: MintScheduler;
 
 function initialize(): void {
   if (config) return;
@@ -204,6 +281,7 @@ function initialize(): void {
   directMinter = new DirectMinter(config, walletManager);
   openSeaMinter = new OpenSeaMinter(config, walletManager);
   autoLister = new AutoLister(config, walletManager);
+  mintScheduler = new MintScheduler(config, walletManager);
 }
 
 // Tool: parse_mint_link
@@ -538,6 +616,215 @@ export async function tool_get_mint_status(params: { tx_hash: string }): Promise
   }
 }
 
+// Tool: get_mint_schedule
+export async function tool_get_mint_schedule(params: { contract_address: string }): Promise<{
+  success: boolean;
+  data: MintScheduleInfo;
+  message: string;
+}> {
+  initialize();
+  if (!isValidAddress(params.contract_address)) {
+    return { success: false, data: null as any, message: '❌ Contract address tidak valid.' };
+  }
+
+  try {
+    const schedule = await mintScheduler.getMintSchedule(params.contract_address);
+
+    let message = `📅 *Jadwal Minting*\n\n`;
+    message += `📍 Contract: ${shortAddress(params.contract_address)}\n`;
+    message += `🔗 Seadrop: ${schedule.isSeadrop ? 'Ya' : 'Bukan'}\n\n`;
+
+    if (schedule.stages.length === 0) {
+      message += `⚠️ Tidak ada jadwal minting yang terdeteksi on-chain.\n`;
+      message += `Kemungkinan:\n`;
+      message += `  • Contract bukan Seadrop\n`;
+      message += `  • Jadwal belum di-set oleh creator\n`;
+      message += `  • Contract menggunakan mekanisme schedule berbeda\n\n`;
+      message += `💡 Coba cek langsung di halaman OpenSea collection untuk info jadwal.`;
+    } else {
+      for (const stage of schedule.stages) {
+        const statusEmoji = stage.status === 'active' ? '🟢' : stage.status === 'upcoming' ? '🟡' : stage.status === 'ended' ? '🔴' : '⚪';
+        message += `${statusEmoji} *Stage: ${stage.stageName}*\n`;
+        if (stage.mintPrice) message += `  💰 Harga: ${stage.mintPrice} ETH\n`;
+        if (stage.startTimeISO) message += `  🕐 Mulai: ${stage.startTimeISO}\n`;
+        if (stage.endTimeISO) message += `  🕐 Selesai: ${stage.endTimeISO}\n`;
+        if (stage.maxPerWallet) message += `  🎒 Max/Wallet: ${stage.maxPerWallet}\n`;
+        if (stage.maxSupply) message += `  📦 Supply: ${stage.maxSupply}\n`;
+        message += `  📊 Status: ${stage.status.toUpperCase()}\n\n`;
+      }
+
+      const upcoming = schedule.stages.find(s => s.status === 'upcoming');
+      const active = schedule.stages.find(s => s.status === 'active');
+
+      if (upcoming) {
+        message += `💡 Ada stage UPCOMING! Gunakan \`schedule_mint\` untuk auto-mint saat waktunya tiba.\n`;
+        if (upcoming.startTimeISO) {
+          message += `   Jadwal: ${upcoming.startTimeISO}\n`;
+        }
+      } else if (active) {
+        message += `💡 Minting SEDANG AKTIF! Gunakan \`mint_nft\` untuk mint sekarang.\n`;
+      }
+    }
+
+    return { success: true, data: schedule, message };
+  } catch (err: any) {
+    return { success: false, data: null as any, message: `❌ Gagal baca schedule: ${err.message?.slice(0, 200)}` };
+  }
+}
+
+// Tool: schedule_mint
+export async function tool_schedule_mint(params: {
+  contract_address: string;
+  mint_price_eth: string;
+  scheduled_time: string;
+  quantity_per_wallet?: number;
+  wallet_indices?: number[];
+  concurrent?: number;
+  mint_function?: string;
+}): Promise<{
+  success: boolean;
+  data: ScheduledMintJob;
+  message: string;
+}> {
+  initialize();
+
+  if (!isValidAddress(params.contract_address)) {
+    return { success: false, data: null as any, message: '❌ Contract address tidak valid.' };
+  }
+
+  // Parse scheduled_time - can be ISO string or Unix ms
+  let scheduledMs: number;
+  const parsed = Date.parse(params.scheduled_time);
+  if (!isNaN(parsed)) {
+    scheduledMs = parsed;
+  } else {
+    const asNumber = Number(params.scheduled_time);
+    if (isNaN(asNumber) || asNumber <= 0) {
+      return { success: false, data: null as any, message: '❌ Format waktu tidak valid. Gunakan ISO 8601 (contoh: "2025-06-01T18:00:00Z") atau Unix timestamp ms.' };
+    }
+    scheduledMs = asNumber;
+  }
+
+  const now = Date.now();
+  if (scheduledMs <= now) {
+    return { success: false, data: null as any, message: `❌ Waktu yang ditentukan sudah lewat (${new Date(scheduledMs).toISOString()}). Gunakan waktu yang akan datang.` };
+  }
+
+  // Check mint price
+  const priceNum = parseFloat(params.mint_price_eth);
+  if (priceNum > walletManager.getConfig().maxMintPriceEth) {
+    return { success: false, data: null as any, message: `⚠️ Mint price (${params.mint_price_eth} ETH) melebihi batas (${walletManager.getConfig().maxMintPriceEth} ETH).` };
+  }
+
+  // Check for WL function
+  if (params.mint_function && (params.mint_function.includes('presale') || params.mint_function.includes('allowlist'))) {
+    return { success: false, data: null as any, message: `⚠️ Fungsi "${params.mint_function}" butuh Merkle proof. Scheduled auto-mint hanya support PUBLIC mint.` };
+  }
+
+  try {
+    const job = mintScheduler.scheduleMint({
+      contractAddress: params.contract_address,
+      mintPriceEth: params.mint_price_eth,
+      quantityPerWallet: params.quantity_per_wallet || 1,
+      walletIndices: params.wallet_indices,
+      concurrent: params.concurrent || 3,
+      mintFunction: params.mint_function,
+      scheduledTimeMs: scheduledMs,
+    });
+
+    const timeUntil = scheduledMs - now;
+    const hoursUntil = Math.floor(timeUntil / 3600000);
+    const minsUntil = Math.floor((timeUntil % 3600000) / 60000);
+
+    let message = `⏰ *Minting Dijadwalkan!*\n\n`;
+    message += `🆔 Job ID: ${job.id}\n`;
+    message += `📍 Contract: ${shortAddress(params.contract_address)}\n`;
+    message += `💰 Harga: ${params.mint_price_eth} ETH\n`;
+    message += `📦 Quantity: ${params.quantity_per_wallet || 1} per wallet\n`;
+    message += `🕐 Waktu: ${job.scheduledTimeISO}\n`;
+    message += `⏳ Dalam: ${hoursUntil}j ${minsUntil}m\n`;
+    message += `📊 Status: pending\n\n`;
+    message += `💡 Gunakan \`list_scheduled_mints\` untuk monitoring.\n`;
+    message += `💡 Gunakan \`cancel_scheduled_mint\` dengan job ID untuk membatalkan.\n\n`;
+    message += `⚠️ Catatan: Scheduled mint hanya berfungsi untuk PUBLIC mint.\n`;
+    message += `Untuk WL/allowlist mint, mint manual di OpenSea karena butuh proof.`;
+
+    return { success: true, data: job, message };
+  } catch (err: any) {
+    return { success: false, data: null as any, message: `❌ Gagal schedule: ${err.message?.slice(0, 200)}` };
+  }
+}
+
+// Tool: list_scheduled_mints
+export async function tool_list_scheduled_mints(): Promise<{
+  success: boolean;
+  data: ScheduledMintJob[];
+  message: string;
+}> {
+  initialize();
+  const jobs = mintScheduler.getScheduledMints();
+
+  if (jobs.length === 0) {
+    return { success: true, data: [], message: '📋 Tidak ada minting yang dijadwalkan.\n\n💡 Gunakan `schedule_mint` untuk menjadwalkan auto-minting.' };
+  }
+
+  let message = `📋 *Scheduled Mints* (${jobs.length} jobs)\n\n`;
+
+  for (const job of jobs) {
+    const statusEmoji = job.status === 'pending' ? '⏳' :
+                        job.status === 'executing' ? '🔄' :
+                        job.status === 'completed' ? '✅' :
+                        job.status === 'failed' ? '❌' :
+                        job.status === 'cancelled' ? '🚫' : '❓';
+
+    message += `${statusEmoji} *${job.id}*\n`;
+    message += `  📍 ${shortAddress(job.contractAddress)} | 💰 ${job.mintPriceEth} ETH\n`;
+    message += `  🕐 ${job.scheduledTimeISO}\n`;
+    message += `  📊 Status: ${job.status}\n`;
+
+    if (job.status === 'completed' && job.results) {
+      const ok = job.results.filter(r => r.success).length;
+      const fail = job.results.filter(r => !r.success).length;
+      message += `  ✅ Berhasil: ${ok} | ❌ Gagal: ${fail}\n`;
+    }
+    if (job.status === 'failed' && job.error) {
+      message += `  ❌ Error: ${truncate(job.error, 80)}\n`;
+    }
+    message += '\n';
+  }
+
+  const pending = jobs.filter(j => j.status === 'pending');
+  if (pending.length > 0) {
+    message += `💡 Gunakan \`cancel_scheduled_mint\` untuk membatalkan job yang masih pending.`;
+  }
+
+  return { success: true, data: jobs, message };
+}
+
+// Tool: cancel_scheduled_mint
+export async function tool_cancel_scheduled_mint(params: { job_id: string }): Promise<{
+  success: boolean;
+  data: { jobId: string; cancelled: boolean };
+  message: string;
+}> {
+  initialize();
+  const cancelled = mintScheduler.cancelScheduledMint(params.job_id);
+
+  if (cancelled) {
+    return {
+      success: true,
+      data: { jobId: params.job_id, cancelled: true },
+      message: `🚫 Job "${params.job_id}" berhasil dibatalkan.`,
+    };
+  } else {
+    return {
+      success: false,
+      data: { jobId: params.job_id, cancelled: false },
+      message: `❌ Gagal membatalkan job "${params.job_id}". Mungkin job sudah dieksekusi, selesai, atau tidak ditemukan.\n\n💡 Gunakan \`list_scheduled_mints\` untuk cek status jobs.`,
+    };
+  }
+}
+
 // Export all tools as a map for easy registration
 export const TOOLS = {
   parse_mint_link: tool_parse_mint_link,
@@ -548,4 +835,8 @@ export const TOOLS = {
   list_nft: tool_list_nft,
   batch_list_nfts: tool_batch_list_nfts,
   get_mint_status: tool_get_mint_status,
+  get_mint_schedule: tool_get_mint_schedule,
+  schedule_mint: tool_schedule_mint,
+  list_scheduled_mints: tool_list_scheduled_mints,
+  cancel_scheduled_mint: tool_cancel_scheduled_mint,
 };
