@@ -1,15 +1,17 @@
-# SKILL.md — Auto Mint Agent
+# SKILL.md — Auto Mint Agent v2.1
 
-> Hermes Skill untuk auto-minting NFT dengan multi-wallet, scheduled minting, dan listing interaktif di OpenSea.
+> Hermes Skill untuk auto-minting NFT dengan multi-wallet, scheduled minting, browser-based minting, dan listing interaktif di OpenSea.
 
 ## Deskripsi
 
-Skill ini menyediakan 12 tools yang bisa dipanggil oleh Hermes agent untuk:
+Skill ini menyediakan 14 tools yang bisa dipanggil oleh Hermes agent untuk:
 - Parse link minting dan detect jenis (direct contract vs OpenSea/Seadrop)
 - Detect informasi detail smart contract NFT
 - Baca jadwal minting on-chain (Seadrop: public/allowlist start & end time)
 - Jadwalkan auto-minting di waktu tertentu (scheduled mint)
-- Execute minting dengan banyak wallet secara simultan
+- Execute minting dengan banyak wallet secara simultan (direct contract)
+- Extract contract address dari website minting (server-side + browser fallback)
+- Browser-based minting untuk website yang butuh Connect Wallet / server signature
 - Approve & list NFT di OpenSea (dengan diskusi harga terlebih dahulu)
 
 ## Prasyarat
@@ -156,7 +158,7 @@ Cek status transaksi minting.
 
 ---
 
-### 9. `get_mint_schedule` 🆕
+### 9. `get_mint_schedule`
 Baca jadwal minting on-chain dari smart contract. Untuk Seadrop/OpenSea contracts, bisa membaca public & allowlist drop schedule termasuk start time, end time, harga, dan max per wallet.
 
 **Parameters:**
@@ -181,7 +183,7 @@ Baca jadwal minting on-chain dari smart contract. Untuk Seadrop/OpenSea contract
 
 ---
 
-### 10. `schedule_mint` 🆕
+### 10. `schedule_mint`
 Jadwalkan auto-minting di waktu tertentu. Agent akan otomatis execute mint saat waktunya tiba.
 
 **⚠️ PENTING:**
@@ -214,7 +216,7 @@ Jadwalkan auto-minting di waktu tertentu. Agent akan otomatis execute mint saat 
 
 ---
 
-### 11. `list_scheduled_mints` 🆕
+### 11. `list_scheduled_mints`
 Lihat semua minting yang sudah dijadwalkan. Berguna untuk monitoring.
 
 **Parameters:** (tidak ada)
@@ -226,7 +228,7 @@ Lihat semua minting yang sudah dijadwalkan. Berguna untuk monitoring.
 
 ---
 
-### 12. `cancel_scheduled_mint` 🆕
+### 12. `cancel_scheduled_mint`
 Batalkan minting yang sudah dijadwalkan.
 
 **Parameters:**
@@ -239,9 +241,136 @@ Batalkan minting yang sudah dijadwalkan.
 
 ---
 
+### 13. `scrape_contract_from_website` 🆕 v2.1
+Extract contract address dari website NFT minting. Tool ini melakukan 2 strategi:
+
+**Strategi 1 — Server-side fetch (cepat):**
+- Fetch HTML dari URL
+- Regex scan untuk semua Ethereum address (0x...)
+- Analisis context sekitar address untuk menentukan kemungkinan NFT
+- Deteksi chain dari HTML content
+- Filter out known non-NFT addresses (WETH, USDC, Seaport, dll)
+
+**Strategi 2 — Browser script (untuk SPA):**
+- Jika website SPA (React/Next.js/Vue) dan address tidak ditemukan via fetch
+- Tool generate browser console script yang bisa dijalankan via `browser_console()`
+- Script scan rendered HTML, window variables, `__NEXT_DATA__`, data attributes, network requests
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `url` | string | ✅ | URL website minting (contoh: "https://onchainpepe.fun") |
+
+**Returns:** `{ success, data: ScrapeResult, message }`
+- `data.contractAddresses[]`: array of address yang ditemukan
+  - `address`: contract address
+  - `context`: teks sekitar address (untuk verifikasi)
+  - `source`: sumber (html, nft_context, meta_tag, script_config)
+  - `isLikelyNFT`: kemungkinan besar NFT contract
+- `data.chain`: chain yang terdeteksi (ethereum, polygon, base, dll)
+- `data.method`: `"server_fetch"` | `"browser_needed"`
+- `data.browserScript`: script untuk `browser_console()` jika SPA
+- `data.confidence`: `"high"` | `"medium"` | `"low"`
+- `data.notes[]`: catatan dan saran
+
+**Contoh penggunaan:**
+```typescript
+// Step 1: Scrape contract dari website
+const scrape = await TOOLS.scrape_contract_from_website({ url: 'https://onchainpepe.fun' });
+
+// Step 2: Jika address ditemukan, cek detail
+if (scrape.success) {
+  const topAddr = scrape.data.contractAddresses.find(a => a.isLikelyNFT);
+  if (topAddr) {
+    const info = await TOOLS.detect_contract({ contract_address: topAddr.address });
+    // Jika standard mint → mint_nft
+    // Jika butuh signature → browser_mint
+  }
+}
+
+// Step 3: Jika SPA dan perlu browser
+if (scrape.data.browserScript) {
+  // Agent menjalankan via browser_console()
+  // 1. browser_navigate(url)
+  // 2. browser_wait(duration=5)
+  // 3. browser_console(expression=scrape.data.browserScript)
+}
+```
+
+---
+
+### 14. `browser_mint` 🆕 v2.1
+Generate browser scripts untuk minting via website yang membutuhkan Connect Wallet atau server signature. Ini adalah **FALLBACK** — gunakan hanya jika `mint_nft` (direct contract) gagal.
+
+**Mengapa perlu browser_mint?**
+Beberapa NFT project menggunakan mint function yang membutuhkan:
+- Server signature (e.g., `mint(address,uint256,bytes)`)
+- Connect Wallet flow sebelum mint
+- Frontend validation sebelum transaksi dikirim
+- Burn-to-mint atau flow kompleks lainnya
+
+Untuk kasus ini, kita inject custom `window.ethereum` ke browser yang:
+- Mimics MetaMask interface (`request()`, `enable()`, `on()`, dll)
+- Signs transactions menggunakan private key via ethers.js (loaded from CDN)
+- Auto-handles `personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction`
+- Supports multi-wallet rotation (sequential)
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `url` | string | ✅ | URL website minting yang mau di-mint via browser |
+| `wallet_indices` | number[] | ❌ | Index wallet yang dipakai. Kosongkan = semua wallet |
+
+**Returns:** `{ success, data: BrowserMintResult, message }`
+- `data.walletScripts[]`: per-wallet injection script
+  - `walletIndex`: index wallet
+  - `address`: wallet address
+  - `injectScript`: JavaScript code untuk `browser_console()`
+- `data.multiWalletScript`: script auto-rotate semua wallet (sequential)
+- `data.autoClickScript`: script auto-detect Connect/Mint buttons
+- `data.stepByStepGuide[]`: panduan langkah demi langkah
+- `data.warnings[]`: peringatan keamanan
+
+**⚠️ KEAMANAN:**
+- Private keys akan berada di browser memory selama sesi berlangsung
+- Gunakan browser instance yang terisolasi (Browserbase)
+- Hancurkan browser instance setelah selesai minting
+- Browser minting SEQUENTIAL (lebih lambat dari direct contract yang PARALLEL)
+
+**Decision Helper:**
+| Mint Function Signature | Rekomendasi |
+|------------------------|-------------|
+| `mint(uint256)` | ✅ Pakai `mint_nft` (cepat, parallel) |
+| `claim(uint256)` | ✅ Pakai `mint_nft` |
+| `mintPublic(uint256)` | ✅ Pakai `mint_nft` |
+| `mint(uint256,bytes)` | ⚠️ Butuh signature → Coba `mint_nft` dulu, kalau gagal pakai `browser_mint` |
+| `mintSigned(address,uint256,bytes)` | ❌ Wajib `browser_mint` |
+| `mintAllowed(address,uint256,bytes32[],bytes)` | ❌ WL mint, tidak bisa di-automasi |
+
+**Contoh penggunaan:**
+```typescript
+// Generate browser minting scripts
+const scripts = await TOOLS.browser_mint({
+  url: 'https://onchainpepe.fun',
+  wallet_indices: [0, 1],  // optional
+});
+
+// Agent kemudian menjalankan langkah-langkah:
+// 1. browser_navigate(url="https://onchainpepe.fun")
+// 2. browser_wait(duration=5)
+// 3. browser_console(expression=scripts.data.walletScripts[0].injectScript)
+// 4. browser_wait(duration=3)
+// 5. Auto-click Connect Wallet via autoClickScript
+// 6. Auto-click Mint via autoClickScript
+// 7. browser_wait(duration=10) // tunggu TX confirm
+// 8. Ulangi untuk wallet berikutnya
+```
+
+---
+
 ## Flow Interaktif
 
-### Flow: Mint Sekarang (Immediate)
+### Flow: Mint Sekarang (Immediate) — Direct Contract
 ```
 User kirim link minting
     ↓
@@ -272,7 +401,7 @@ Agent → list_nft / batch_list_nfts
 Done!
 ```
 
-### Flow: Scheduled Mint (Auto-Mint di Waktu Tertentu) 🆕
+### Flow: Scheduled Mint (Auto-Mint di Waktu Tertentu)
 ```
 User kirim link minting + info jadwal
     ↓
@@ -280,9 +409,7 @@ Agent → parse_mint_link (detect jenis mint)
     ↓
 Agent → get_mint_schedule (baca jadwal on-chain)
     ↓
-Agent tampilkan jadwal ke user:
-  "Public mint mulai: 1 Jun 2025 18:00 UTC"
-  "Harga: 0.05 ETH | Max 2 per wallet"
+Agent tampilkan jadwal ke user
     ↓
 Agent tanya: "Mau saya auto-mint saat public mint mulai?"
     ↓
@@ -290,18 +417,63 @@ User: "Ya, mint 1 per wallet pake semua wallet"
     ↓
 Agent → schedule_mint (jadwalkan di waktu public mint)
     ↓
-Agent: "Sudah dijadwalkan! Job ID: mint_xxx"
-  "Akan auto-mint pada 1 Jun 2025 18:00 UTC"
-    ↓
 ... tunggu sampai waktunya ...
     ↓
 Auto-execute minting saat waktunya tiba
     ↓
-Agent → tampilkan hasil ke user
-    ↓
 Agent tanya: "Mau di-list? Harga berapa?"
+```
+
+### Flow: Browser Minting (Website yang Butuh Connect Wallet) 🆕 v2.1
+```
+User kirim website URL minting (bukan contract address)
     ↓
-... lanjut flow listing ...
+Agent → scrape_contract_from_website (cari contract address)
+    ↓
+┌─────────────────────────────────────────────────┐
+│ Address ditemukan?                               │
+├──────────┬──────────────────────────────────────┤
+│ YA       │ TIDAK (SPA / butuh browser)           │
+│    ↓     │    ↓                                   │
+│ detect_  │ Gunakan browserConsole script          │
+│ contract │ dari scrape result                     │
+│    ↓     │    ↓                                   │
+│ Standard │ Cari address dari rendered page        │
+│ mint?    │    ↓                                   │
+│    ↓     │ detect_contract                        │
+│ ┌───┐    │    ↓                                   │
+│ │YA │    │ Standard mint?                         │
+│ └─┬─┘    │    ↓                                   │
+│   ↓      │ ┌───┐  ┌────┐                         │
+│ mint_nft │ │YA │  │TIDAK│                         │
+│          │ └─┬─┘  └──┬─┘                         │
+│          │   ↓       ↓                             │
+│          │ mint_nft  browser_mint                  │
+└──────────┴──────────────────────────────────────┘
+    ↓
+Browser Mint Flow:
+    ↓
+Agent → browser_mint (generate scripts)
+    ↓
+Agent → browser_navigate(url)
+    ↓
+Agent → browser_console(expression=walletInjectScript)
+    ↓
+Agent → browser_wait (3 detik)
+    ↓
+Agent → browser_console(expression=autoClickScript)
+    ↓  (klik Connect Wallet)
+Agent → browser_wait (3 detik)
+    ↓
+Agent → browser_console(expression=autoClickScript)
+    ↓  (klik Mint)
+Agent → browser_wait (10 detik, tunggu TX)
+    ↓
+Agent → Repeat untuk wallet berikutnya (sequential)
+    ↓
+Agent → Destroy browser instance
+    ↓
+Done!
 ```
 
 ## Aturan Penting untuk Agent
@@ -314,6 +486,9 @@ Agent tanya: "Mau di-list? Harga berapa?"
 6. **Scheduled mint hanya untuk PUBLIC mint** — WL/allowlist mint butuh Merkle proof yang hanya bisa didapat dari OpenSea UI
 7. **Selalu baca jadwal on-chain** via `get_mint_schedule` sebelum scheduling — jangan tebak waktu
 8. **Agent harus tetap berjalan** sampai scheduled mint tiba — jika agent mati, job hilang
+9. **Prioritaskan direct contract minting** (`mint_nft`) — lebih cepat dan parallel. Gunakan `browser_mint` hanya sebagai fallback
+10. **Hancurkan browser instance** setelah browser minting selesai — private keys ada di browser memory
+11. **Scrape dulu, mint nanti** — selalu cari contract address via `scrape_contract_from_website` sebelum memutuskan approach
 
 ## Catatan tentang WL/Allowlist Mint
 
@@ -324,17 +499,41 @@ Untuk whitelist (WL) atau allowlist mint di OpenSea:
 - `mintAllowed()` dengan empty proof `[]` akan gagal
 - **Solusi:** Untuk WL mint, user harus mint manual di OpenSea. Scheduled auto-mint hanya untuk public mint.
 
+## Catatan tentang Browser Minting v2.1
+
+Browser minting adalah **fallback** untuk website yang tidak bisa di-mint langsung via smart contract:
+
+| Approach | Speed | Multi-Wallet | Kapan Dipakai |
+|----------|-------|--------------|---------------|
+| `mint_nft` (direct contract) | ⚡ PARALLEL | ✅ Simultaneous | Standard public mint |
+| `browser_mint` (browser-based) | 🐌 SEQUENTIAL | ⚠️ One at a time | Butuh server signature / Connect Wallet |
+
+**Cara kerja browser_mint:**
+1. Tool generate JavaScript injection scripts
+2. Script meng-override `window.ethereum` dengan custom provider
+3. Custom provider menggunakan ethers.js + private key untuk sign TX
+4. Agent menjalankan script via `browser_console()`
+5. Website "melihat" wallet terhubung seperti MetaMask
+6. Agent auto-klik Connect Wallet dan Mint button
+7. Untuk multi-wallet: rotate satu per satu (inject → connect → mint → next)
+
+**Keamanan browser_mint:**
+- Private keys berada di browser memory selama sesi
+- WAJIB gunakan Browserbase (isolated cloud browser)
+- WAJIB destroy browser setelah selesai
+- Jangan pernah log private keys di console
+
 ## Supported Chains
 
-| Chain | Chain ID | Direct Mint | Seadrop | Schedule | Listing |
-|-------|----------|-------------|---------|----------|---------|
-| Ethereum | 1 | ✅ | ✅ | ✅ | ✅ |
-| Polygon | 137 | ✅ | ✅ | ✅ | ✅ |
-| Arbitrum | 42161 | ✅ | ✅ | ✅ | ✅ |
-| Optimism | 10 | ✅ | ✅ | ✅ | ✅ |
-| Base | 8453 | ✅ | ✅ | ✅ | ✅ |
-| Zora | 7777777 | ✅ | ❌ | ❌ | ❌ |
-| Blast | 81457 | ✅ | ❌ | ❌ | ❌ |
+| Chain | Chain ID | Direct Mint | Seadrop | Schedule | Listing | Browser Mint |
+|-------|----------|-------------|---------|----------|---------|-------------|
+| Ethereum | 1 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Polygon | 137 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Arbitrum | 42161 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Optimism | 10 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Base | 8453 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Zora | 7777777 | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Blast | 81457 | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 ## Import & Usage
 
@@ -350,10 +549,10 @@ const info = await TOOLS.detect_contract({ contract_address: '0x...' });
 // Check wallets
 const balances = await TOOLS.check_wallets();
 
-// Get mint schedule (NEW)
+// Get mint schedule
 const schedule = await TOOLS.get_mint_schedule({ contract_address: '0x...' });
 
-// Schedule mint (NEW)
+// Schedule mint
 const job = await TOOLS.schedule_mint({
   contract_address: '0x...',
   mint_price_eth: '0.05',
@@ -361,13 +560,23 @@ const job = await TOOLS.schedule_mint({
   quantity_per_wallet: 1,
 });
 
-// List scheduled mints (NEW)
+// List scheduled mints
 const jobs = await TOOLS.list_scheduled_mints();
 
-// Cancel scheduled mint (NEW)
+// Cancel scheduled mint
 await TOOLS.cancel_scheduled_mint({ job_id: 'mint_1234567890_1' });
 
-// Mint now
+// Scrape contract from website (NEW v2.1)
+const scrape = await TOOLS.scrape_contract_from_website({ url: 'https://onchainpepe.fun' });
+// → Returns contract addresses found in website
+// → If SPA, returns browserScript for browser_console()
+
+// Browser mint (NEW v2.1) — FALLBACK for server-signature mints
+const scripts = await TOOLS.browser_mint({ url: 'https://onchainpepe.fun' });
+// → Returns wallet injection scripts, auto-click script, step-by-step guide
+// → Agent executes via browser_navigate + browser_console
+
+// Mint now (direct contract)
 const results = await TOOLS.mint_nft({
   contract_address: '0x...',
   mint_price_eth: '0.05',
@@ -394,3 +603,4 @@ const listResult = await TOOLS.list_nft({
 - Validasi contract address sebelum minting
 - Deteksi fungsi presale/allowlist dan berikan warning
 - Scheduled mint hanya untuk public mint (WL mint diblokir)
+- Browser minting: isolated browser instance, auto-destroy after use

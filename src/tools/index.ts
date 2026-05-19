@@ -1,13 +1,15 @@
 /**
- * Auto Mint Agent - Hermes Skill
+ * Auto Mint Agent - Hermes Skill v2.1
  *
  * Skill ini menyediakan tools untuk auto-minting NFT dengan multi-wallet
- * dan listing interaktif di OpenSea.
+ * dan listing interaktif di OpenSea. Termasuk browser-based minting
+ * untuk website yang membutuhkan Connect Wallet / server signature.
  *
  * Flow:
  * 1. User kirim link → parse_mint_link untuk detect jenis
  * 2. detect_contract untuk cek info detail contract
- * 3. mint_nft untuk execute minting dengan multi-wallet
+ * 3a. Jika standard mint → mint_nft (direct contract, PARALLEL)
+ * 3b. Jika butuh browser → scrape_contract_from_website + browser_mint (SEQUENTIAL)
  * 4. Agent DISKUSI dulu sama user mau list berapa
  * 5. list_nft / batch_list_nfts untuk listing setelah user setuju harga
  */
@@ -17,6 +19,8 @@ import { WalletManager } from '../wallet';
 import { DirectMinter, OpenSeaMinter, parseMintLink, ParsedMintInfo, MintResult, ContractInfo } from '../mint';
 import { AutoLister, ListResult } from '../listing';
 import { MintScheduler, MintScheduleInfo, ScheduledMintJob } from '../scheduler';
+import { scrapeContractFromWebsite, ScrapeResult } from '../browser/scrape';
+import { generateBrowserMintScripts, BrowserMintResult, generateMintDetectionScript } from '../browser/inject';
 import { shortAddress, shortTxHash, truncate, isValidAddress } from '../utils';
 
 // ============================================================
@@ -257,6 +261,39 @@ export const SKILL_DEFINITION = {
           },
         },
         required: ['job_id'],
+      },
+    },
+    {
+      name: 'scrape_contract_from_website',
+      description: 'Extract contract address dari website NFT minting. Tool ini fetch HTML website dan cari contract address secara otomatis. Jika website SPA (React/Next.js) dan address tidak ditemukan via fetch, tool akan generate browser console script yang bisa dijalankan via browser_console() untuk extract dari rendered page.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'URL website minting (contoh: "https://onchainpepe.fun", "https://example.com/mint")',
+          },
+        },
+        required: ['url'],
+      },
+    },
+    {
+      name: 'browser_mint',
+      description: 'Generate browser scripts untuk minting via website yang membutuhkan Connect Wallet atau server signature. Tool ini menghasilkan: (1) Wallet injection script (custom window.ethereum yang auto-sign TX), (2) Auto-click script untuk Connect/Mint buttons, (3) Multi-wallet rotation script, (4) Step-by-step guide. Agent menjalankan script ini via browser_console(). FALLBACK: Gunakan hanya jika direct contract minting (mint_nft) gagal karena butuh server signature.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'URL website minting yang mau di-mint via browser',
+          },
+          wallet_indices: {
+            type: 'array',
+            items: { type: 'number' },
+            description: 'Index wallet yang dipakai. Kosongkan = semua wallet.',
+          },
+        },
+        required: ['url'],
       },
     },
   ],
@@ -825,6 +862,157 @@ export async function tool_cancel_scheduled_mint(params: { job_id: string }): Pr
   }
 }
 
+// Tool: scrape_contract_from_website
+export async function tool_scrape_contract_from_website(params: { url: string }): Promise<{
+  success: boolean;
+  data: ScrapeResult;
+  message: string;
+}> {
+  initialize();
+
+  if (!params.url || !params.url.startsWith('http')) {
+    return { success: false, data: null as any, message: '❌ URL tidak valid. Harus dimulai dengan http:// atau https://' };
+  }
+
+  try {
+    const result = await scrapeContractFromWebsite(params.url);
+
+    let message = `🌐 *Contract Scrape Results*\n\n`;
+    message += `📍 URL: ${result.url}\n`;
+    message += `🔧 Method: ${result.method === 'server_fetch' ? 'Server-side fetch' : 'Browser needed (SPA)'}\n`;
+    message += `🎯 Confidence: ${result.confidence}\n`;
+
+    if (result.chain) {
+      message += `🔗 Chain: ${result.chain}\n`;
+    }
+
+    message += `\n`;
+
+    if (result.contractAddresses.length > 0) {
+      const nftOnes = result.contractAddresses.filter(a => a.isLikelyNFT);
+      const otherOnes = result.contractAddresses.filter(a => !a.isLikelyNFT);
+
+      if (nftOnes.length > 0) {
+        message += `🎯 *Kemungkinan NFT Contract:*\n`;
+        for (const addr of nftOnes.slice(0, 5)) {
+          message += `  ✅ ${addr.address} (${addr.source})\n`;
+          if (addr.context) {
+            message += `     Context: ${truncate(addr.context, 80)}\n`;
+          }
+        }
+        message += `\n`;
+      }
+
+      if (otherOnes.length > 0) {
+        message += `📋 *Address lain ditemukan:*\n`;
+        for (const addr of otherOnes.slice(0, 5)) {
+          message += `  ⚪ ${addr.address} (${addr.source})\n`;
+        }
+        message += `\n`;
+      }
+
+      // Suggest next step
+      const topAddress = nftOnes[0]?.address || otherOnes[0]?.address;
+      if (topAddress) {
+        message += `💡 *Next Step:*\n`;
+        message += `   Gunakan \`detect_contract\` untuk cek detail: detect_contract({ contract_address: "${topAddress}" })\n`;
+      }
+    } else {
+      message += `❌ Tidak ada contract address ditemukan via server-side fetch.\n\n`;
+    }
+
+    if (result.browserScript) {
+      message += `\n🔧 *Browser Script Tersedia:*\n`;
+      message += `   Website ini SPA, butuh browser untuk extract.\n`;
+      message += `   Script ada di data.browserScript — jalankan via browser_console().\n`;
+      message += `\n   Langkah:\n`;
+      message += `   1. browser_navigate(url="${result.url}")\n`;
+      message += `   2. browser_wait(duration=5)\n`;
+      message += `   3. browser_console(expression=data.browserScript)\n`;
+    }
+
+    if (result.notes.length > 0) {
+      message += `\n📝 Catatan:\n`;
+      for (const n of result.notes) {
+        message += `  • ${n}\n`;
+      }
+    }
+
+    return {
+      success: result.contractAddresses.length > 0,
+      data: result,
+      message,
+    };
+  } catch (err: any) {
+    return { success: false, data: null as any, message: `❌ Scrape gagal: ${err.message?.slice(0, 300)}` };
+  }
+}
+
+// Tool: browser_mint
+export async function tool_browser_mint(params: {
+  url: string;
+  wallet_indices?: number[];
+}): Promise<{
+  success: boolean;
+  data: BrowserMintResult;
+  message: string;
+}> {
+  initialize();
+
+  if (!params.url || !params.url.startsWith('http')) {
+    return { success: false, data: null as any, message: '❌ URL tidak valid. Harus dimulai dengan http:// atau https://' };
+  }
+
+  try {
+    const scripts = generateBrowserMintScripts(config, walletManager, {
+      url: params.url,
+      walletIndices: params.wallet_indices,
+    });
+
+    let message = `🌐 *Browser Minting Scripts Generated*\n\n`;
+    message += `📍 URL: ${params.url}\n`;
+    message += `💼 Wallets: ${scripts.walletScripts.length}\n\n`;
+
+    message += `📋 *Wallet Injection Scripts:*\n`;
+    for (const ws of scripts.walletScripts) {
+      message += `  🔑 Wallet ${ws.walletIndex}: ${shortAddress(ws.address)}\n`;
+      message += `     Script: data.walletScripts[${ws.walletIndex}].injectScript\n`;
+    }
+    message += `\n`;
+
+    message += `🔄 *Multi-Wallet Rotation Script:*\n`;
+    message += `   data.multiWalletScript — Auto-rotate semua wallet\n`;
+    message += `   (Sequential: inject → connect → mint → next)\n\n`;
+
+    message += `👆 *Auto-Click Script:*\n`;
+    message += `   data.autoClickScript — Auto-detect Connect/Mint buttons\n\n`;
+
+    message += `📖 *Step-by-Step Guide:*\n`;
+    for (const step of scripts.stepByStepGuide) {
+      message += `   ${step}\n`;
+    }
+    message += `\n`;
+
+    // Warnings
+    message += `⚠️ *WARNINGS:*\n`;
+    for (const w of scripts.warnings) {
+      message += `  • ${w}\n`;
+    }
+    message += `\n`;
+
+    // Decision helper
+    message += `💡 *Decision Helper:*\n`;
+    message += `   Coba dulu detect_contract() → kalau function signature:\n`;
+    message += `   • mint(uint256) → ✅ Pakai mint_nft (lebih cepat, parallel)\n`;
+    message += `   • mint(uint256,bytes) → ⚠️ Butuh signature → Pakai browser_mint\n`;
+    message += `   • mintSigned(uint256,bytes,bytes32) → ❌ Wajib browser_mint\n`;
+
+    return { success: true, data: scripts, message };
+  } catch (err: any) {
+    return { success: false, data: null as any, message: `❌ Browser mint script generation gagal: ${err.message?.slice(0, 300)}` };
+  }
+}
+
 // Export all tools as a map for easy registration
 export const TOOLS = {
   parse_mint_link: tool_parse_mint_link,
@@ -839,4 +1027,6 @@ export const TOOLS = {
   schedule_mint: tool_schedule_mint,
   list_scheduled_mints: tool_list_scheduled_mints,
   cancel_scheduled_mint: tool_cancel_scheduled_mint,
+  scrape_contract_from_website: tool_scrape_contract_from_website,
+  browser_mint: tool_browser_mint,
 };
