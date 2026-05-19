@@ -16,7 +16,7 @@ import { loadConfig, Config } from '../config';
 import { WalletManager } from '../wallet';
 import { DirectMinter, OpenSeaMinter, parseMintLink, ParsedMintInfo, MintResult, ContractInfo } from '../mint';
 import { AutoLister, ListResult } from '../listing';
-import { shortAddress, truncate, isValidAddress } from '../utils';
+import { shortAddress, shortTxHash, truncate, isValidAddress } from '../utils';
 
 // ============================================================
 // SKILL DEFINITION - Hermes reads this to know available tools
@@ -380,7 +380,7 @@ export async function tool_mint_nft(params: {
 
   for (const r of results) {
     if (r.success) {
-      message += `✅ Wallet ${r.walletIndex}: ${shortAddress(r.walletAddress)} | TX: ${shortAddress(r.txHash || '')}`;
+      message += `✅ Wallet ${r.walletIndex}: ${shortAddress(r.walletAddress)} | TX: ${shortTxHash(r.txHash || '')}`;
       if (r.tokenId) message += ` | Token #${r.tokenId}`;
       message += '\n';
     } else {
@@ -524,14 +524,14 @@ export async function tool_get_mint_status(params: { tx_hash: string }): Promise
   try {
     const receipt = await walletManager.getProvider().getTransactionReceipt(params.tx_hash);
     if (!receipt) {
-      return { success: true, data: { status: 'pending', blockNumber: null, gasUsed: null }, message: `⏳ TX ${shortAddress(params.tx_hash)} masih pending...` };
+      return { success: true, data: { status: 'pending', blockNumber: null, gasUsed: null }, message: `⏳ TX ${shortTxHash(params.tx_hash)} masih pending...` };
     }
     const status = receipt.status === 1 ? 'confirmed' : 'reverted';
     const emoji = receipt.status === 1 ? '✅' : '❌';
     return {
       success: receipt.status === 1,
       data: { status, blockNumber: Number(receipt.blockNumber), gasUsed: receipt.gasUsed.toString() },
-      message: `${emoji} TX ${shortAddress(params.tx_hash)} ${status}\n📦 Block: ${receipt.blockNumber}\n⛽ Gas: ${receipt.gasUsed.toString()}`,
+      message: `${emoji} TX ${shortTxHash(params.tx_hash)} ${status}\n📦 Block: ${receipt.blockNumber}\n⛽ Gas: ${receipt.gasUsed.toString()}`,
     };
   } catch (err: any) {
     return { success: false, data: { status: 'error', blockNumber: null, gasUsed: null }, message: `❌ Error: ${err.message?.slice(0, 200)}` };

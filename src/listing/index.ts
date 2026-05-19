@@ -147,9 +147,13 @@ export class AutoLister {
     return results;
   }
 
-  // BUG-010 FIX: Use correct OpenSea API v2 format for creating listings
-  // OpenSea v2 uses POST /v2/offers with proper order structure
-  // If API fails, we return a helpful message for manual listing
+  // NOTE: OpenSea listing via API v2 requires EIP-712 typed data signing.
+  // The current implementation sends unsigned order parameters, which the API will reject.
+  // To fully implement this, you need to:
+  // 1. Build the Seaport order parameters (done below)
+  // 2. Sign with EIP-712 using the wallet's signTypedData()
+  // 3. POST the signed order to OpenSea
+  // For now, if API listing fails, we return a manual listing URL so the user can list manually.
   private async createListingViaAPI(
     contractAddress: string, tokenId: string, priceEth: string,
     walletAddress: string, expirationHours: number

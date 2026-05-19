@@ -2,17 +2,17 @@ import { ethers, Contract } from 'ethers';
 import { Config, COMMON_MINT_ABI } from '../config';
 import { WalletInfo, WalletManager } from '../wallet';
 import { MintResult } from './direct';
-import PQueue from 'p-queue';
+import { runConcurrent } from '../utils';
 import axios from 'axios';
 
-// BUG-007 FIX: Corrected ABI types from actual Seadrop contract
-// getPublicDrop returns a struct with proper uint256/uint64 types, not uint8
+// Seadrop ABI - corrected types from actual Seadrop contract
+// feeRecipient is address type (not uint80), mintPrice is uint80 (wei)
 const SEADROP_ABI = [
   'function mintPublic(address feeRecipient, address minter, uint256 quantity) payable',
   'function mintAllowed(address feeRecipient, address minter, uint256 quantity, bytes[] proof) payable',
   'function mintSigned(address feeRecipient, address minter, uint256 quantity, bytes signature) payable',
-  'function getPublicDrop(address nftContract) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, uint80 feeRecipient))',
-  'function getDropStageInfo(address nftContract, uint8 dropStageIndex) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, uint80 feeRecipient))',
+  'function getPublicDrop(address nftContract) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, address feeRecipient))',
+  'function getDropStageInfo(address nftContract, uint8 dropStageIndex) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, address feeRecipient))',
 ];
 
 const SEADROP_ADDRESSES: Record<number, string> = {
@@ -64,7 +64,6 @@ export class OpenSeaMinter {
         const dropInfo = await seadrop.getPublicDrop(contractAddress);
         result.isSeadrop = true;
         if (dropInfo.mintPrice) result.mintPrice = ethers.formatEther(dropInfo.mintPrice);
-        // BUG-004 FIX: Read feeRecipient from drop info instead of hardcoding
         if (dropInfo.feeRecipient) result.feeRecipient = dropInfo.feeRecipient;
       } catch {}
     }
@@ -124,12 +123,10 @@ export class OpenSeaMinter {
     const seadropAddress = SEADROP_ADDRESSES[chainId];
     if (!seadropAddress) throw new Error(`Seadrop not supported on chain ${chainId}`);
 
-    const queue = new PQueue({ concurrency: concurrent });
-    const results: MintResult[] = [];
-    // BUG-004 FIX: Use feeRecipient from getSeadropInfo, fallback to OpenSea's known address
+    // Use feeRecipient from getSeadropInfo, fallback to OpenSea's known address
     const feeRecipient = feeRecipientFromDrop || '0x0000a26b00c1F0DF003000390027140000fAa719';
 
-    const promises = wallets.map((wi) => queue.add(async () => {
+    const tasks = wallets.map((wi) => async (): Promise<MintResult> => {
       const result: MintResult = {
         walletIndex: wi.index, walletAddress: wi.address,
         success: false, txHash: null, tokenId: null, tokenIds: [],
@@ -171,15 +168,35 @@ export class OpenSeaMinter {
         if (receipt && receipt.status === 1) {
           result.success = true;
           result.gasUsed = receipt.gasUsed.toString();
-          // BUG-005 FIX: Extract ALL token IDs, handle ERC721 & ERC1155
+          // Extract ALL token IDs, handle ERC721 & ERC1155
           const erc721TransferTopic = ethers.id('Transfer(address,address,uint256)');
           const erc1155TransferSingleTopic = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
+          const erc1155TransferBatchTopic = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
           for (const log of receipt.logs) {
             if (log.address.toLowerCase() !== contractAddress.toLowerCase()) continue;
             if (log.topics[0] === erc721TransferTopic && log.topics.length >= 4) {
+              // ERC721 Transfer: topics[3] = tokenId
               result.tokenIds.push(BigInt(log.topics[3]).toString());
-            } else if (log.topics[0] === erc1155TransferSingleTopic && log.topics.length >= 4) {
-              result.tokenIds.push(BigInt(log.topics[3]).toString());
+            } else if (log.topics[0] === erc1155TransferSingleTopic) {
+              // ERC1155 TransferSingle: id is in data, not topics
+              try {
+                const iface = new ethers.Interface(['event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)']);
+                const decoded = iface.parseLog({ topics: log.topics as string[], data: log.data });
+                if (decoded?.args?.id !== undefined) {
+                  result.tokenIds.push(decoded.args.id.toString());
+                }
+              } catch {}
+            } else if (log.topics[0] === erc1155TransferBatchTopic) {
+              // ERC1155 TransferBatch: ids[] in data
+              try {
+                const iface = new ethers.Interface(['event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)']);
+                const decoded = iface.parseLog({ topics: log.topics as string[], data: log.data });
+                if (decoded?.args?.ids) {
+                  for (const id of decoded.args.ids) {
+                    result.tokenIds.push(id.toString());
+                  }
+                }
+              } catch {}
             }
           }
           if (result.tokenIds.length > 0) result.tokenId = result.tokenIds[0];
@@ -190,11 +207,8 @@ export class OpenSeaMinter {
         result.error = err.message?.slice(0, 200) || 'Unknown error';
       }
       return result;
-    }));
+    });
 
-    const mintResults = await Promise.all(promises);
-    const validResults = mintResults.filter((r): r is MintResult => r !== undefined);
-    results.push(...validResults);
-    return results;
+    return runConcurrent(tasks, concurrent);
   }
 }

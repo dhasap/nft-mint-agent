@@ -97,6 +97,7 @@ export const COMMON_MINT_ABI = [
   'function safeMint(address to) payable',
   'function safeMint(address to, uint256 quantity) payable',
   'function mintNFT(uint256 quantity) payable',
+  'function mintBatch(uint256 quantity) payable',
   'function freeMint(uint256 quantity) payable',
   'function freeMint(address to, uint256 quantity) payable',
   'function presaleMint(uint256 quantity, bytes proof) payable',

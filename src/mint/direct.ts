@@ -1,7 +1,7 @@
 import { ethers, Contract } from 'ethers';
 import { Config, COMMON_MINT_ABI, MINT_FUNCTION_SIGNATURES } from '../config';
 import { WalletInfo, WalletManager } from '../wallet';
-import PQueue from 'p-queue';
+import { runConcurrent } from '../utils';
 
 export interface MintResult {
   walletIndex: number;
@@ -126,10 +126,8 @@ export class DirectMinter {
 
     const abi = [`function ${funcSignature} payable`, ...COMMON_MINT_ABI];
     const funcName = funcSignature.split('(')[0];
-    const queue = new PQueue({ concurrency: concurrent });
-    const results: MintResult[] = [];
 
-    const promises = wallets.map((wi, idx) => queue.add(async () => {
+    const tasks = wallets.map((wi) => async (): Promise<MintResult> => {
       const result: MintResult = {
         walletIndex: wi.index, walletAddress: wi.address,
         success: false, txHash: null, tokenId: null, tokenIds: [],
@@ -181,18 +179,36 @@ export class DirectMinter {
         if (receipt && receipt.status === 1) {
           result.success = true;
           result.gasUsed = receipt.gasUsed.toString();
-          // BUG-005 FIX: Extract ALL token IDs, handle ERC721 & ERC1155
+          // Extract ALL token IDs, handle ERC721 & ERC1155
           const erc721TransferTopic = ethers.id('Transfer(address,address,uint256)');
           const erc1155TransferSingleTopic = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
+          const erc1155TransferBatchTopic = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
           for (const log of receipt.logs) {
             if (log.address.toLowerCase() !== contractAddress.toLowerCase()) continue;
             if (log.topics[0] === erc721TransferTopic && log.topics.length >= 4) {
+              // ERC721 Transfer: topics[3] = tokenId
               const tid = BigInt(log.topics[3]).toString();
               result.tokenIds.push(tid);
-            } else if (log.topics[0] === erc1155TransferSingleTopic && log.topics.length >= 4) {
-              // ERC1155 TransferSingle: id is in the data, but also decoded from topics
-              const tid = BigInt(log.topics[3]).toString();
-              result.tokenIds.push(tid);
+            } else if (log.topics[0] === erc1155TransferSingleTopic) {
+              // ERC1155 TransferSingle: id & value are in data (abi-encoded uint256, uint256)
+              try {
+                const iface = new ethers.Interface(['event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)']);
+                const decoded = iface.parseLog({ topics: log.topics as string[], data: log.data });
+                if (decoded?.args?.id !== undefined) {
+                  result.tokenIds.push(decoded.args.id.toString());
+                }
+              } catch {}
+            } else if (log.topics[0] === erc1155TransferBatchTopic) {
+              // ERC1155 TransferBatch: ids[] & values[] are in data
+              try {
+                const iface = new ethers.Interface(['event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)']);
+                const decoded = iface.parseLog({ topics: log.topics as string[], data: log.data });
+                if (decoded?.args?.ids) {
+                  for (const id of decoded.args.ids) {
+                    result.tokenIds.push(id.toString());
+                  }
+                }
+              } catch {}
             }
           }
           // Set first tokenId for backward compat
@@ -206,11 +222,8 @@ export class DirectMinter {
         result.error = err.message?.slice(0, 200) || 'Unknown error';
       }
       return result;
-    }));
+    });
 
-    const mintResults = await Promise.all(promises);
-    const validResults = mintResults.filter((r): r is MintResult => r !== undefined);
-    results.push(...validResults);
-    return results;
+    return runConcurrent(tasks, concurrent);
   }
 }
