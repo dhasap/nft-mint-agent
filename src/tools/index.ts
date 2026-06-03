@@ -1216,7 +1216,7 @@ export async function tool_cancel_pending_tx(params: {
 
     // Get current gas price and bump it
     const feeData = await provider.getFeeData();
-    const currentMaxFee = feeData.maxFeePerGas ?? (await provider.getFeeData()).gasPrice ?? BigInt(0);
+    const currentMaxFee = feeData.maxFeePerGas ?? feeData.gasPrice ?? BigInt(0);
     const currentPriorityFee = feeData.maxPriorityFeePerGas ?? BigInt(0);
 
     const bumpMultiplier = BigInt(100 + gas_bump);
