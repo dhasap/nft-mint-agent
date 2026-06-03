@@ -1,6 +1,6 @@
 {
-  "name": "auto-mint-agent",
-  "version": "2.1.0",
+  "name": "nft-minting-skill",
+  "version": "3.0.0",
   "description": "Hermes skill for auto-minting NFTs with multi-wallet support and interactive listing on OpenSea",
   "main": "dist/index.js",
   "scripts": {
@@ -17,6 +17,7 @@
   "devDependencies": {
     "typescript": "^5.5.0",
     "ts-node": "^10.9.2",
-    "@types/node": "^20.14.0"
+    "@types/node": "^20.14.0",
+    "vitest": "^1.6.0"
   }
 }

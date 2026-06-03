@@ -2,6 +2,7 @@ import { ethers, Contract } from 'ethers';
 import { Config, COMMON_MINT_ABI, MINT_FUNCTION_SIGNATURES } from '../config';
 import { WalletInfo, WalletManager } from '../wallet';
 import { runConcurrent } from '../utils';
+import { GasOracle, resolveGasMode } from '../gas/oracle';
 
 export interface MintResult {
   walletIndex: number;
@@ -9,7 +10,7 @@ export interface MintResult {
   success: boolean;
   txHash: string | null;
   tokenId: string | null;          // First token ID (for backward compat)
-  tokenIds: string[];              // BUG-005 FIX: All token IDs minted
+  tokenIds: string[];              // All token IDs minted
   error: string | null;
   gasUsed: string | null;
   mintPrice: string;
@@ -30,10 +31,18 @@ export interface ContractInfo {
 export class DirectMinter {
   private config: Config;
   private walletManager: WalletManager;
+  private gasOracle: GasOracle;
 
   constructor(config: Config, walletManager: WalletManager) {
     this.config = config;
     this.walletManager = walletManager;
+    // BUG-010 FIX: Initialize gas oracle with mode from config
+    this.gasOracle = new GasOracle(
+      walletManager.getProvider(),
+      resolveGasMode(config.gasMode),
+      config.maxGasPriceGwei,
+      config.customGasMultiplier,
+    );
   }
 
   async detectContract(contractAddress: string): Promise<ContractInfo> {
@@ -125,7 +134,11 @@ export class DirectMinter {
     }
 
     const abi = [`function ${funcSignature} payable`, ...COMMON_MINT_ABI];
-    const funcName = funcSignature.split('(')[0];
+
+    // BUG-003 FIX: Use full signature as function name when it contains parentheses
+    // This avoids the ambiguous overload problem (e.g., contract["mint"] is ambiguous
+    // when there are multiple mint overloads)
+    const funcName = funcSignature.includes('(') ? funcSignature : funcSignature.split('(')[0];
 
     const tasks = wallets.map((wi) => async (): Promise<MintResult> => {
       const result: MintResult = {
@@ -149,8 +162,13 @@ export class DirectMinter {
           args = [quantity];
         }
 
-        const maxFeePerGas = ethers.parseUnits(Math.min(maxGasPriceGwei, this.config.maxGasPriceGwei).toString(), 'gwei');
-        const maxPriorityFeePerGas = ethers.parseUnits(this.config.priorityFeeGwei.toString(), 'gwei');
+        // BUG-010 FIX: Fetch dynamic gas fees from the provider via GasOracle
+        const gasOverrides = await this.gasOracle.getGasOverrides();
+
+        // Respect user-provided maxGasPriceGwei cap
+        const userMaxFee = ethers.parseUnits(Math.min(maxGasPriceGwei, this.config.maxGasPriceGwei).toString(), 'gwei');
+        const maxFeePerGas = gasOverrides.maxFeePerGas > userMaxFee ? userMaxFee : gasOverrides.maxFeePerGas;
+        const maxPriorityFeePerGas = gasOverrides.maxPriorityFeePerGas;
 
         let estimatedGas: bigint;
         if (gasLimit) {
@@ -162,6 +180,12 @@ export class DirectMinter {
           } catch {
             estimatedGas = BigInt(300000 * quantity);
           }
+        }
+
+        // BUG-017 FIX: Cap gas limit at 93% of 30M block gas limit
+        const BLOCK_GAS_LIMIT_CAP = BigInt(28_000_000);
+        if (estimatedGas > BLOCK_GAS_LIMIT_CAP) {
+          estimatedGas = BLOCK_GAS_LIMIT_CAP;
         }
 
         if (this.config.dryRun) {

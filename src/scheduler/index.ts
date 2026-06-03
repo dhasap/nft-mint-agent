@@ -4,6 +4,9 @@
  * Reads on-chain mint schedules (Seadrop startTime/endTime)
  * and schedules minting jobs to execute at the right time.
  *
+ * BUG-001 FIX: Jobs are now persisted to disk in ./data/scheduled_jobs.json
+ * On startup, pending jobs are re-scheduled; expired jobs are marked "missed".
+ *
  * For WL/presale mints: OpenSea handles Merkle proof server-side.
  * When user clicks "Mint" on OpenSea website, the frontend calls
  * OpenSea's API which generates the per-wallet proof. Our agent
@@ -19,6 +22,8 @@
  */
 
 import { ethers, Contract } from 'ethers';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Config, COMMON_MINT_ABI } from '../config';
 import { WalletManager } from '../wallet';
 import { MintResult } from '../mint/direct';
@@ -75,10 +80,14 @@ export interface ScheduledMintJob {
   scheduledTime: number;     // Unix ms when to execute
   scheduledTimeISO: string;
   createdAt: number;
-  status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled' | 'missed';
   results?: MintResult[];
   error?: string;
 }
+
+// Persistence file path
+const PERSISTENCE_DIR = path.join(process.cwd(), 'data');
+const PERSISTENCE_FILE = path.join(PERSISTENCE_DIR, 'scheduled_jobs.json');
 
 export class MintScheduler {
   private config: Config;
@@ -94,6 +103,75 @@ export class MintScheduler {
     this.walletManager = walletManager;
     this.directMinter = new DirectMinter(config, walletManager);
     this.openSeaMinter = new OpenSeaMinter(config, walletManager);
+    // BUG-001 FIX: Load persisted jobs on startup
+    this.loadPersistedJobs();
+  }
+
+  /**
+   * BUG-001 FIX: Persist all jobs to disk
+   */
+  private persistJobs(): void {
+    try {
+      if (!fs.existsSync(PERSISTENCE_DIR)) {
+        fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
+      }
+      const serializable: any[] = [];
+      for (const job of this.jobs.values()) {
+        // Strip non-serializable fields (results may contain BigInt via receipt)
+        serializable.push({
+          ...job,
+          results: job.results ? job.results.map(r => ({
+            ...r,
+            gasUsed: r.gasUsed ?? null,
+          })) : undefined,
+        });
+      }
+      fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(serializable, null, 2), 'utf-8');
+    } catch (err: any) {
+      console.error(`[MintScheduler] Failed to persist jobs: ${err.message}`);
+    }
+  }
+
+  /**
+   * BUG-001 FIX: Load persisted jobs from disk and re-schedule pending ones
+   */
+  private loadPersistedJobs(): void {
+    try {
+      if (!fs.existsSync(PERSISTENCE_FILE)) return;
+      const raw = fs.readFileSync(PERSISTENCE_FILE, 'utf-8');
+      const saved: ScheduledMintJob[] = JSON.parse(raw);
+      const now = Date.now();
+
+      for (const job of saved) {
+        this.jobs.set(job.id, job);
+        // Track the counter to avoid ID collisions
+        const counterMatch = job.id.match(/mint_\d+_(\d+)/);
+        if (counterMatch) {
+          const c = parseInt(counterMatch[1], 10);
+          if (c > this.jobCounter) this.jobCounter = c;
+        }
+
+        if (job.status === 'pending') {
+          const delay = job.scheduledTime - now;
+          if (delay <= 0) {
+            // Expired while we were down — mark as missed
+            job.status = 'missed';
+            job.error = 'Scheduled time passed while agent was offline';
+            console.log(`[MintScheduler] Job ${job.id} missed (expired while offline)`);
+          } else {
+            // Re-schedule
+            const timer = setTimeout(() => {
+              this.executeJob(job.id);
+            }, delay);
+            this.timers.set(job.id, timer);
+            console.log(`[MintScheduler] Re-scheduled job ${job.id} — fires in ${Math.round(delay / 1000)}s`);
+          }
+        }
+      }
+      this.persistJobs(); // write back with any missed updates
+    } catch (err: any) {
+      console.error(`[MintScheduler] Failed to load persisted jobs: ${err.message}`);
+    }
   }
 
   /**
@@ -294,6 +372,9 @@ export class MintScheduler {
       this.timers.set(id, timer);
     }
 
+    // BUG-001 FIX: Persist after every change
+    this.persistJobs();
+
     return job;
   }
 
@@ -311,6 +392,8 @@ export class MintScheduler {
     }
 
     job.status = 'cancelled';
+    // BUG-001 FIX: Persist after cancellation
+    this.persistJobs();
     return true;
   }
 
@@ -337,6 +420,7 @@ export class MintScheduler {
 
     job.status = 'executing';
     this.timers.delete(jobId);
+    this.persistJobs();
 
     try {
       const contractInfo = await this.directMinter.detectContract(job.contractAddress);
@@ -367,5 +451,8 @@ export class MintScheduler {
       job.error = err.message?.slice(0, 300) || 'Unknown error';
       job.status = 'failed';
     }
+
+    // BUG-001 FIX: Persist after execution
+    this.persistJobs();
   }
 }

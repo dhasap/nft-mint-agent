@@ -1,10 +1,10 @@
-# SKILL.md — Auto Mint Agent v2.1
+# SKILL.md — Auto Mint Agent v3.0
 
 > Hermes Skill untuk auto-minting NFT dengan multi-wallet, scheduled minting, browser-based minting, dan listing interaktif di OpenSea.
 
 ## Deskripsi
 
-Skill ini menyediakan 14 tools yang bisa dipanggil oleh Hermes agent untuk:
+Skill ini menyediakan 16 tools yang bisa dipanggil oleh Hermes agent untuk:
 - Parse link minting dan detect jenis (direct contract vs OpenSea/Seadrop)
 - Detect informasi detail smart contract NFT
 - Baca jadwal minting on-chain (Seadrop: public/allowlist start & end time)
@@ -365,6 +365,35 @@ const scripts = await TOOLS.browser_mint({
 // 7. browser_wait(duration=10) // tunggu TX confirm
 // 8. Ulangi untuk wallet berikutnya
 ```
+
+---
+
+### 15. `get_skill_health` 🆕 v3.0
+Cek kondisi skill: konektivitas RPC, balance semua wallet, status scheduler, dan gas mode.
+```bash
+node runner.mjs get_skill_health '{}'
+```
+Returns: RPC status (connected, chainId, latency), wallet balances, pending jobs, gas mode, warnings.
+
+### 16. `cancel_pending_tx` 🆕 v3.0
+Cancel transaksi yang stuck di mempool dengan replace-by-fee (RBF).
+```bash
+node runner.mjs cancel_pending_tx '{"tx_hash":"0x...","wallet_index":0,"gas_bump":20}'
+```
+Sends 0-value TX to self with same nonce but higher gas to replace the stuck TX.
+
+---
+
+## Gas Modes (v3.0) 🆕
+
+| Mode | Multiplier | Use Case |
+|------|-----------|----------|
+| `eco` | 0.8x | Lebih murah, lebih lambat |
+| `normal` | 1.0x | Default |
+| `aggressive` | 1.5x | Hot mints, kompetitif |
+| `custom` | CUSTOM_GAS_MULTIPLIER | User-defined |
+
+Set di `.env`: `GAS_MODE=normal`
 
 ---
 

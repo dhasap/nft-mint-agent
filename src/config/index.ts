@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+import * as dotenv from 'dotenv';
 dotenv.config();
 
 export interface Config {
@@ -13,6 +13,8 @@ export interface Config {
   maxMintPriceEth: number;
   openseaApiKey: string;
   dryRun: boolean;
+  gasMode: string;
+  customGasMultiplier: number;
 }
 
 function getEnv(key: string, defaultValue?: string): string {
@@ -52,6 +54,8 @@ export function loadConfig(): Config {
     maxMintPriceEth: getEnvNumber('MAX_MINT_PRICE_ETH', 0.5),
     openseaApiKey: getEnv('OPENSEA_API_KEY', ''),
     dryRun: getEnvBool('DRY_RUN', false),
+    gasMode: getEnv('GAS_MODE', 'normal'),
+    customGasMultiplier: getEnvNumber('CUSTOM_GAS_MULTIPLIER', 1.0),
   };
 }
 
@@ -61,12 +65,49 @@ export const CHAIN_IDS: Record<string, number> = {
   base: 8453, zora: 7777777, blast: 81457,
 };
 
+/**
+ * BUG-005 FIX: Validate that the configured chain matches the RPC provider's actual chain ID.
+ * Call this at startup or before first mint to detect misconfigurations early.
+ */
+export async function validateChainId(
+  provider: import('ethers').Provider,
+  config: Config,
+): Promise<{ valid: boolean; expected: number; actual: number; error?: string }> {
+  const expected = CHAIN_IDS[config.chain] || 1;
+  try {
+    const network = await provider.getNetwork();
+    const actual = Number(network.chainId);
+    if (actual !== expected) {
+      return {
+        valid: false,
+        expected,
+        actual,
+        error: `Chain mismatch: config says "${config.chain}" (chainId ${expected}) but RPC reports chainId ${actual}. Check CHAIN or RPC_URL in .env.`,
+      };
+    }
+    return { valid: true, expected, actual };
+  } catch (err: any) {
+    return {
+      valid: false,
+      expected,
+      actual: 0,
+      error: `Failed to query RPC for chainId: ${err.message?.slice(0, 200)}`,
+    };
+  }
+}
+
 export const OPENSEA_COLLECTION_REGEX = /opensea\.io\/collection\/([a-zA-Z0-9_-]+)/;
 export const OPENSEA_ASSET_REGEX = /opensea\.io\/assets\/([a-zA-Z0-9_-]+)\/(0x[a-fA-F0-9]{40})\/(\d+)/;
 // No /g flag - avoids stateful lastIndex footgun
 // Use new RegExp(CONTRACT_ADDRESS_PATTERN, 'g') when you need global matching
 export const CONTRACT_ADDRESS_PATTERN = '0x[a-fA-F0-9]{40}';
 export const CONTRACT_ADDRESS_REGEX = /0x[a-fA-F0-9]{40}/;
+
+// BUG-013 NOTE: Zora chain (chainId 7777777) uses a different protocol.
+// Zora NFTs are minted via Zora's own contracts, not Seadrop.
+// The seadropAddress mapping does NOT include Zora; direct contract
+// detection will attempt standard mint functions instead.
+// If Zora minting fails, users may need to mint via zora.co directly.
 
 export const MINT_FUNCTION_SIGNATURES = [
   'mint(uint256)',

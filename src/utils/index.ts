@@ -48,3 +48,87 @@ export async function runConcurrent<T>(
   await Promise.all(workers);
   return results;
 }
+
+/**
+ * BUG-007 FIX: Retry logic with exponential backoff for RPC calls.
+ *
+ * Distinguishes retryable errors (timeout, rate limit, 429, network errors)
+ * from non-retryable errors (insufficient funds, reverted transactions, etc.)
+ */
+const RETRYABLE_PATTERNS = [
+  'timeout',
+  'timed out',
+  'rate limit',
+  '429',
+  'too many requests',
+  'server error',
+  '500',
+  '502',
+  '503',
+  '504',
+  'network error',
+  'econnrefused',
+  'econnreset',
+  'socket hang up',
+  'request failed',
+  'connection refused',
+  'nonce too low', // can retry with new nonce
+];
+
+const NON_RETRYABLE_PATTERNS = [
+  'insufficient funds',
+  'insufficient balance',
+  'execution reverted',
+  'transaction reverted',
+  'nonce has already been used',
+  'invalid nonce',
+  'underflow',
+  'overflow',
+  'invalid opcode',
+  'require(false)',
+];
+
+function isRetryableError(err: any): boolean {
+  const msg = (err.message || err.reason || '').toLowerCase();
+  const code = (err.code || '').toLowerCase();
+
+  // Check non-retryable first (more specific)
+  for (const pattern of NON_RETRYABLE_PATTERNS) {
+    if (msg.includes(pattern)) return false;
+  }
+
+  // Check retryable patterns
+  for (const pattern of RETRYABLE_PATTERNS) {
+    if (msg.includes(pattern)) return true;
+  }
+
+  // Also check error code
+  if (code === 'timeout' || code === 'network_error' || code === 'server_error') return true;
+
+  // Default: not retryable
+  return false;
+}
+
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  baseDelayMs: number = 1000,
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      if (attempt === maxRetries) break;
+      if (!isRetryableError(err)) {
+        // Non-retryable — throw immediately
+        throw err;
+      }
+      // Exponential backoff: 1s, 2s, 4s, ...
+      const delay = baseDelayMs * Math.pow(2, attempt);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}

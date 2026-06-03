@@ -1,5 +1,5 @@
 /**
- * Auto Mint Agent - Hermes Skill v2.1
+ * Auto Mint Agent - Hermes Skill v3.0
  *
  * Skill ini menyediakan tools untuk auto-minting NFT dengan multi-wallet
  * dan listing interaktif di OpenSea. Termasuk browser-based minting
@@ -14,21 +14,22 @@
  * 5. list_nft / batch_list_nfts untuk listing setelah user setuju harga
  */
 
-import { loadConfig, Config } from '../config';
+import { loadConfig, Config, validateChainId, CHAIN_IDS } from '../config';
 import { WalletManager } from '../wallet';
 import { DirectMinter, OpenSeaMinter, parseMintLink, ParsedMintInfo, MintResult, ContractInfo } from '../mint';
 import { AutoLister, ListResult } from '../listing';
 import { MintScheduler, MintScheduleInfo, ScheduledMintJob } from '../scheduler';
 import { scrapeContractFromWebsite, ScrapeResult } from '../browser/scrape';
 import { generateBrowserMintScripts, BrowserMintResult, generateMintDetectionScript } from '../browser/inject';
-import { shortAddress, shortTxHash, truncate, isValidAddress } from '../utils';
+import { shortAddress, shortTxHash, truncate, isValidAddress, withRetry } from '../utils';
+import { GasOracle, resolveGasMode } from '../gas/oracle';
 
 // ============================================================
 // SKILL DEFINITION - Hermes reads this to know available tools
 // ============================================================
 
 export const SKILL_DEFINITION = {
-  name: 'auto-mint-agent',
+  name: 'nft-minting-skill',
   description: 'Skill untuk auto-minting NFT dengan multi-wallet dan listing interaktif di OpenSea. User kirim link minting, agent detect jenis mint, execute dengan banyak wallet, lalu diskusi harga listing sebelum di-list.',
   tools: [
     {
@@ -296,6 +297,27 @@ export const SKILL_DEFINITION = {
         required: ['url'],
       },
     },
+    {
+      name: 'get_skill_health',
+      description: 'Cek kondisi skill: konektivitas RPC, balance semua wallet, status scheduler, dan gas mode. Berguna untuk monitoring real-time.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'cancel_pending_tx',
+      description: 'Cancel transaksi yang stuck di mempool dengan replace-by-fee (RBF). Kirim 0-value TX ke diri sendiri dengan nonce sama tapi gas lebih tinggi.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tx_hash: { type: 'string', description: 'Transaction hash yang mau di-cancel' },
+          wallet_index: { type: 'number', description: 'Index wallet pemilik TX (0-based)' },
+          gas_bump: { type: 'number', description: 'Persentase gas bump (default: 20 = +20%)' },
+        },
+        required: ['tx_hash', 'wallet_index'],
+      },
+    },
   ],
 };
 
@@ -430,14 +452,21 @@ export async function tool_mint_nft(params: {
     return { success: false, data: [], message: '❌ Contract address tidak valid.' };
   }
 
-  // Check mint price against max
+  // BUG-016 FIX: Allow free mints (price 0) — only block if price exceeds max
   const priceNum = parseFloat(mint_price_eth);
+  if (priceNum < 0) {
+    return { success: false, data: [], message: '❌ Mint price tidak boleh negatif.' };
+  }
   if (priceNum > walletManager.getConfig().maxMintPriceEth) {
     return {
       success: false, data: [],
       message: `⚠️ Mint price (${mint_price_eth} ETH) melebihi MAX_MINT_PRICE_ETH (${walletManager.getConfig().maxMintPriceEth} ETH). Ubah config atau konfirmasi manual.`,
     };
   }
+
+  // BUG-008 FIX: Validate concurrent parameter — cap at wallet count
+  const walletCount = wallet_indices?.length || walletManager.getWalletCount();
+  const effectiveConcurrent = Math.min(concurrent, walletCount);
 
   // BUG-003 FIX: Check if mint function requires proof (presale/allowlist)
   const effectiveMintFunction = mint_function;
@@ -469,7 +498,7 @@ export async function tool_mint_nft(params: {
         mintPrice: mint_price_eth,
         quantity: quantity_per_wallet,
         walletsToUse: wallet_indices,
-        concurrent,
+        concurrent: effectiveConcurrent,
         mintFunction: mint_function || contractInfo.functionSignature || undefined,
       });
     } else {
@@ -479,7 +508,7 @@ export async function tool_mint_nft(params: {
         mintPrice: mint_price_eth,
         quantity: quantity_per_wallet,
         walletsToUse: wallet_indices,
-        concurrent,
+        concurrent: effectiveConcurrent,
       });
     }
   } catch (err: any) {
@@ -630,6 +659,7 @@ export async function tool_batch_list_nfts(params: {
 }
 
 // Tool: get_mint_status
+// BUG-006 FIX: Distinguish "pending" vs "not_found" by also checking getTransaction
 export async function tool_get_mint_status(params: { tx_hash: string }): Promise<{
   success: boolean;
   data: { status: string; blockNumber: number | null; gasUsed: string | null };
@@ -637,16 +667,33 @@ export async function tool_get_mint_status(params: { tx_hash: string }): Promise
 }> {
   initialize();
   try {
-    const receipt = await walletManager.getProvider().getTransactionReceipt(params.tx_hash);
-    if (!receipt) {
-      return { success: true, data: { status: 'pending', blockNumber: null, gasUsed: null }, message: `⏳ TX ${shortTxHash(params.tx_hash)} masih pending...` };
+    const provider = walletManager.getProvider();
+    const receipt = await provider.getTransactionReceipt(params.tx_hash);
+    if (receipt) {
+      const status = receipt.status === 1 ? 'confirmed' : 'reverted';
+      const emoji = receipt.status === 1 ? '✅' : '❌';
+      return {
+        success: receipt.status === 1,
+        data: { status, blockNumber: Number(receipt.blockNumber), gasUsed: receipt.gasUsed.toString() },
+        message: `${emoji} TX ${shortTxHash(params.tx_hash)} ${status}\n📦 Block: ${receipt.blockNumber}\n⛽ Gas: ${receipt.gasUsed.toString()}`,
+      };
     }
-    const status = receipt.status === 1 ? 'confirmed' : 'reverted';
-    const emoji = receipt.status === 1 ? '✅' : '❌';
+
+    // Receipt is null — check if TX exists in mempool
+    const tx = await provider.getTransaction(params.tx_hash);
+    if (tx) {
+      return {
+        success: true,
+        data: { status: 'pending', blockNumber: null, gasUsed: null },
+        message: `⏳ TX ${shortTxHash(params.tx_hash)} masih pending di mempool...`,
+      };
+    }
+
+    // TX not found anywhere
     return {
-      success: receipt.status === 1,
-      data: { status, blockNumber: Number(receipt.blockNumber), gasUsed: receipt.gasUsed.toString() },
-      message: `${emoji} TX ${shortTxHash(params.tx_hash)} ${status}\n📦 Block: ${receipt.blockNumber}\n⛽ Gas: ${receipt.gasUsed.toString()}`,
+      success: false,
+      data: { status: 'not_found', blockNumber: null, gasUsed: null },
+      message: `❓ TX ${shortTxHash(params.tx_hash)} tidak ditemukan. Pastikan hash benar atau TX mungkin sudah dropped dari mempool.`,
     };
   } catch (err: any) {
     return { success: false, data: { status: 'error', blockNumber: null, gasUsed: null }, message: `❌ Error: ${err.message?.slice(0, 200)}` };
@@ -818,6 +865,20 @@ export async function tool_list_scheduled_mints(): Promise<{
     message += `  📍 ${shortAddress(job.contractAddress)} | 💰 ${job.mintPriceEth} ETH\n`;
     message += `  🕐 ${job.scheduledTimeISO}\n`;
     message += `  📊 Status: ${job.status}\n`;
+
+    // BUG-025 FIX: Add countdown for pending jobs
+    if (job.status === 'pending') {
+      const now = Date.now();
+      const diff = job.scheduledTime - now;
+      if (diff > 0) {
+        const hours = Math.floor(diff / 3600000);
+        const mins = Math.floor((diff % 3600000) / 60000);
+        const secs = Math.floor((diff % 60000) / 1000);
+        message += `  ⏳ Countdown: ${hours}j ${mins}m ${secs}s\n`;
+      } else {
+        message += `  ⏳ Siap dieksekusi\n`;
+      }
+    }
 
     if (job.status === 'completed' && job.results) {
       const ok = job.results.filter(r => r.success).length;
@@ -1013,6 +1074,183 @@ export async function tool_browser_mint(params: {
   }
 }
 
+// ============================================================
+// NEW TOOLS v3.0
+// ============================================================
+
+// Tool 15: get_skill_health
+// Check RPC connectivity, wallet balances, and scheduler status
+export async function tool_get_skill_health(): Promise<{
+  success: boolean;
+  data: {
+    rpc: { connected: boolean; chainId: number; chainName: string; latencyMs: number };
+    wallets: { index: number; address: string; ethBalance: string; pendingTxCount: number }[];
+    scheduler: { pendingJobs: number; nextJobIn: string | null; totalJobs: number };
+    gasMode: string;
+    warnings: string[];
+  };
+  message: string;
+}> {
+  initialize();
+  const warnings: string[] = [];
+  const provider = walletManager.getProvider();
+
+  // RPC connectivity check
+  let rpcStatus = { connected: false, chainId: 0, chainName: config.chain, latencyMs: 0 };
+  try {
+    const start = Date.now();
+    const network = await provider.getNetwork();
+    rpcStatus = {
+      connected: true,
+      chainId: Number(network.chainId),
+      chainName: config.chain,
+      latencyMs: Date.now() - start,
+    };
+    const expected = CHAIN_IDS[config.chain] || 1;
+    if (rpcStatus.chainId !== expected) {
+      warnings.push(`Chain mismatch: config says "${config.chain}" (${expected}) but RPC reports ${rpcStatus.chainId}`);
+    }
+  } catch (err: any) {
+    warnings.push(`RPC connection failed: ${err.message?.slice(0, 100)}`);
+  }
+
+  // Wallet balances
+  const walletData: { index: number; address: string; ethBalance: string; pendingTxCount: number }[] = [];
+  try {
+    const balances = await walletManager.getBalances();
+    for (const b of balances) {
+      walletData.push({ index: b.walletIndex, address: b.address, ethBalance: b.ethBalance, pendingTxCount: 0 });
+      if (parseFloat(b.ethBalance) < 0.005) {
+        warnings.push(`Wallet ${b.walletIndex} (${shortAddress(b.address)}) has low balance: ${b.ethBalance} ETH`);
+      }
+    }
+  } catch (err: any) {
+    warnings.push(`Failed to fetch wallet balances: ${err.message?.slice(0, 100)}`);
+  }
+
+  // Scheduler status
+  const jobs = mintScheduler.getScheduledMints();
+  const pendingJobs = jobs.filter(j => j.status === 'pending');
+  const nextJob = pendingJobs.sort((a, b) => a.scheduledTime - b.scheduledTime)[0];
+  let nextJobIn: string | null = null;
+  if (nextJob) {
+    const diff = nextJob.scheduledTime - Date.now();
+    if (diff > 0) {
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      nextJobIn = `${h}h ${m}m`;
+    } else {
+      nextJobIn = 'ready';
+    }
+  }
+
+  const schedulerStatus = {
+    pendingJobs: pendingJobs.length,
+    nextJobIn,
+    totalJobs: jobs.length,
+  };
+
+  if (pendingJobs.length === 0) {
+    warnings.push('No pending scheduled mints.');
+  }
+
+  // Build message
+  let message = `🏥 *Skill Health Check*\n\n`;
+  message += `🔗 RPC: ${rpcStatus.connected ? '✅ Connected' : '❌ Disconnected'} | Chain ${rpcStatus.chainId} (${rpcStatus.chainName}) | ${rpcStatus.latencyMs}ms\n`;
+  message += `💼 Wallets: ${walletData.length}\n`;
+  for (const w of walletData) {
+    const emoji = parseFloat(w.ethBalance) > 0.01 ? '✅' : '⚠️';
+    message += `  ${emoji} ${w.index}: ${shortAddress(w.address)} — ${w.ethBalance} ETH\n`;
+  }
+  message += `\n⏰ Scheduler: ${schedulerStatus.pendingJobs} pending / ${schedulerStatus.totalJobs} total`;
+  if (schedulerStatus.nextJobIn) message += ` | Next: ${schedulerStatus.nextJobIn}`;
+  message += `\n⛽ Gas Mode: ${config.gasMode}`;
+
+  if (warnings.length > 0) {
+    message += `\n\n⚠️ Warnings:\n`;
+    for (const w of warnings) message += `  • ${w}\n`;
+  }
+
+  return {
+    success: warnings.length === 0 || (rpcStatus.connected && walletData.length > 0),
+    data: {
+      rpc: rpcStatus,
+      wallets: walletData,
+      scheduler: schedulerStatus,
+      gasMode: config.gasMode,
+      warnings,
+    },
+    message,
+  };
+}
+
+// Tool 16: cancel_pending_tx
+// Cancel a stuck transaction by sending a 0-value TX to self with same nonce but higher gas (RBF)
+export async function tool_cancel_pending_tx(params: {
+  tx_hash: string;
+  wallet_index: number;
+  gas_bump?: number;
+}): Promise<{
+  success: boolean;
+  data: { cancelTxHash: string | null; originalNonce: number | null };
+  message: string;
+}> {
+  initialize();
+  const { tx_hash, wallet_index, gas_bump = 20 } = params;
+
+  const walletInfo = walletManager.getWallet(wallet_index);
+  if (!walletInfo) {
+    return { success: false, data: { cancelTxHash: null, originalNonce: null }, message: `❌ Wallet ${wallet_index} tidak ditemukan.` };
+  }
+
+  try {
+    const provider = walletManager.getProvider();
+
+    // Get the original TX to find its nonce
+    const originalTx = await provider.getTransaction(tx_hash);
+    if (!originalTx) {
+      return { success: false, data: { cancelTxHash: null, originalNonce: null }, message: `❌ TX ${shortTxHash(tx_hash)} tidak ditemukan di mempool atau chain.` };
+    }
+
+    const nonce = originalTx.nonce;
+
+    // Get current gas price and bump it
+    const feeData = await provider.getFeeData();
+    const currentMaxFee = feeData.maxFeePerGas ?? (await provider.getFeeData()).gasPrice ?? BigInt(0);
+    const currentPriorityFee = feeData.maxPriorityFeePerGas ?? BigInt(0);
+
+    const bumpMultiplier = BigInt(100 + gas_bump);
+    const newMaxFee = (currentMaxFee * bumpMultiplier) / BigInt(100);
+    const newPriorityFee = (currentPriorityFee * bumpMultiplier) / BigInt(100);
+
+    if (config.dryRun) {
+      return {
+        success: true,
+        data: { cancelTxHash: '0x_dry_run', originalNonce: Number(nonce) },
+        message: `[DRY RUN] Would cancel TX ${shortTxHash(tx_hash)} with nonce ${nonce}, gas bump ${gas_bump}%`,
+      };
+    }
+
+    // Send cancel TX: 0 value to self, same nonce, higher gas
+    const cancelTx = await walletInfo.wallet.sendTransaction({
+      to: walletInfo.address,
+      value: BigInt(0),
+      nonce: nonce,
+      maxFeePerGas: newMaxFee,
+      maxPriorityFeePerGas: newPriorityFee,
+      gasLimit: BigInt(21000),
+    });
+
+    return {
+      success: true,
+      data: { cancelTxHash: cancelTx.hash, originalNonce: Number(nonce) },
+      message: `✅ Cancel TX sent!\nOriginal: ${shortTxHash(tx_hash)} (nonce ${nonce})\nCancel: ${shortTxHash(cancelTx.hash)}\nGas bump: +${gas_bump}%`,
+    };
+  } catch (err: any) {
+    return { success: false, data: { cancelTxHash: null, originalNonce: null }, message: `❌ Cancel gagal: ${err.message?.slice(0, 200)}` };
+  }
+}
+
 // Export all tools as a map for easy registration
 export const TOOLS = {
   parse_mint_link: tool_parse_mint_link,
@@ -1029,4 +1267,6 @@ export const TOOLS = {
   cancel_scheduled_mint: tool_cancel_scheduled_mint,
   scrape_contract_from_website: tool_scrape_contract_from_website,
   browser_mint: tool_browser_mint,
+  get_skill_health: tool_get_skill_health,
+  cancel_pending_tx: tool_cancel_pending_tx,
 };

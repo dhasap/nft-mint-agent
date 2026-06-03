@@ -8,11 +8,19 @@
  * 3. Auto-clicks Connect Wallet / Mint buttons
  * 4. Supports multi-wallet rotation (sequential)
  *
- * IMPORTANT SECURITY NOTES:
- * - Private keys are embedded in browser memory (Browserbase cloud browser)
- * - Each wallet is injected one at a time (sequential, not parallel)
- * - Browser instance should be destroyed after use
- * - Never log private keys in console
+ * BUG-004 FIX: Added prominent security warnings and signing proxy documentation.
+ * BUG-014 FIX: Enhanced findConnectButton/findMintButton with more DOM patterns,
+ * data-* attributes, aria-labels, and added dry-run mode.
+ *
+ * SECURITY WARNING (BUG-004):
+ * This approach embeds private keys in browser memory. This is inherently risky.
+ * For production use, consider a signing proxy approach where:
+ * - A WebSocket server runs on the agent side
+ * - The browser sends sign requests to the agent
+ * - The agent signs and returns the signature
+ * - Private keys never leave the agent memory
+ *
+ * Current mitigation: Use isolated Browserbase instances, destroy after use.
  */
 
 import { Config } from '../config';
@@ -60,10 +68,10 @@ export function generateBrowserMintScripts(
     autoClickScript: '',
     stepByStepGuide: [],
     warnings: [
-      'Private key akan berada di browser memory selama sesi berlangsung.',
-      'Gunakan browser instance yang terisolasi (Browserbase).',
-      'Hancurkan browser instance setelah selesai minting.',
-      'Browser minting bersifat SEQUENTIAL (satu wallet per waktu), tidak seperti direct mint yang PARALLEL.',
+      'CRITICAL: Private keys are embedded in browser memory!',
+      'Only use with isolated browser instances (Browserbase cloud browsers).',
+      'Destroy the browser instance immediately after minting.',
+      'Consider a signing proxy for production: WebSocket signing where private keys stay on the agent. Browser minting is SEQUENTIAL (one wallet at a time), slower than direct mint (PARALLEL).',
     ],
   };
 
