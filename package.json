@@ -1,7 +1,44 @@
 {
   "name": "nft-minting-skill",
   "version": "3.0.0",
-  "description": "Hermes skill for auto-minting NFTs with multi-wallet support and interactive listing on OpenSea",
+  "description": "Multi-wallet NFT minting toolkit — 16 tools for automated minting, scheduled drops, OpenSea listing, and browser-based minting. Works as a Hermes agent skill or standalone Node.js library.",
+  "keywords": [
+    "nft",
+    "minting",
+    "ethereum",
+    "web3",
+    "opensea",
+    "seaport",
+    "multi-wallet",
+    "automated-minting",
+    "nft-bot",
+    "erc721",
+    "erc1155",
+    "evm",
+    "nft-mint",
+    "mint-bot",
+    "opensea-listing",
+    "hermes-agent",
+    "ai-agent",
+    "browser-minting",
+    "scheduled-mint",
+    "gas-optimization",
+    "multi-chain",
+    "defi",
+    "blockchain",
+    "typescript",
+    "ethers.js"
+  ],
+  "author": "dhasap",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dhasap/nft-minting-skill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dhasap/nft-minting-skill/issues"
+  },
+  "homepage": "https://github.com/dhasap/nft-minting-skill#readme",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
