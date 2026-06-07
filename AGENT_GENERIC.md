@@ -5,6 +5,32 @@
 - Untuk platform spesifik: lihat AGENT_HERMES.md / AGENT_CLAUDE_CODE.md
 - Semua referensi ke "browser" = "gunakan browser tool yang tersedia di platformmu"
 
+## ⚠️ MINT KOMPETITIF / HOT DROP — WAJIB FAST-MINT
+
+Jika user minta **auto mint**, **max mint**, **FCFS**, mint yang supply cepat habis, atau mint mulai <30 menit lagi, **JANGAN** mengandalkan `schedule_mint`, agent cron, browser click, atau `estimateGas` tepat saat live. Gunakan fast path:
+
+```bash
+cd /root/nft-minting-skill
+node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --gas-mode aggressive --priority-gwei 2 --max-fee-gwei 100 --early-ms 750
+```
+
+Status/preflight tanpa kirim TX:
+
+```bash
+node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --status
+```
+
+Aturan wajib sebelum broadcast:
+1. **On-chain wins over UI/SSR.** Selalu baca `getPublicDrop()` dari SeaDrop tepat sebelum plan/broadcast untuk `mintPrice`, `startTime`, `endTime`, dan `maxTotalMintableByWallet`. Jangan percaya OpenSea UI kalau berbeda.
+2. **Resolve SeaDrop minter yang benar.** Mainnet OpenSea SeaDrop baru sering memakai `0x00005EA00Ac477B1030CE78506496e8C2dE24bf5`. Jangan pakai address lama `0x00005EA67...` kalau `eth_getCode` kosong / `getPublicDrop` gagal.
+3. **Jangan kirim value stale.** Jika live price berubah dari 0 ke berbayar, hitung ulang `value = mintPrice * quantity` dan cek `MAX_MINT_PRICE_ETH`.
+4. **Cek saldo upfront.** Wallet harus punya minimal `mintPrice * qty + gasLimit * maxFeePerGas`, bukan cuma estimasi gas akhir. Kalau kurang, skip dan bilang user fund dulu.
+5. **No live delay.** Jangan melakukan `estimateGas`, browser clicking, tool rebuild, atau patch saat detik mint live. Fast script harus pre-warm: RPC, nonce, fee recipient, gas, balance, dan sign/broadcast raw tx paralel.
+6. **Gas agresif untuk hot mint.** Default `--gas-mode aggressive`; user harus set `--priority-gwei`/`--max-fee-gwei` cukup tinggi dan wallet harus funded.
+7. **Output waktu pakai WIB** (`Asia/Jakarta`) untuk schedule/status/result.
+
+Gunakan `mint_nft`/`schedule_mint` hanya untuk mint santai atau tidak kompetitif. Untuk OpenSea drop panas, fast-mint adalah default.
+
 ## Flow Decision-Making
 
 ### Immediate Mint

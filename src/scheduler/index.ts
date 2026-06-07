@@ -31,20 +31,42 @@ import { DirectMinter } from '../mint/direct';
 import { OpenSeaMinter } from '../mint/opensea';
 import { shortAddress } from '../utils';
 
-// Seadrop ABI for reading schedule
+// SeaDrop ABI for reading schedule.
+// Current OpenSea SeaDrop V1 uses this tuple layout (uint48 start/end, maxTotalMintableByWallet).
 const SEADROP_SCHEDULE_ABI = [
-  'function getPublicDrop(address nftContract) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, address feeRecipient))',
-  'function getAllowListDrop(address nftContract) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, address feeRecipient))',
-  'function getDropStageInfo(address nftContract, uint8 dropStageIndex) view returns (tuple(uint80 mintPrice, uint24 feeBps, uint64 startTime, uint64 endTime, uint16 maxTotalMintSupplyByWallet, uint32 maxTokenSupplyForStage, uint8 dropStageIndex, address feeRecipient))',
+  'function getPublicDrop(address nftContract) view returns (tuple(uint80 mintPrice, uint48 startTime, uint48 endTime, uint16 maxTotalMintableByWallet, uint16 feeBps, bool restrictFeeRecipients))',
+  'function getAllowedFeeRecipients(address nftContract) view returns (address[])',
+  'function getFeeRecipientIsAllowed(address nftContract, address feeRecipient) view returns (bool)',
 ];
 
-const SEADROP_ADDRESSES: Record<number, string> = {
-  1: '0x00005EA67Ac36D4AA7f7bE4D33385971BAe75DEe',
-  8453: '0x00005EA67Ac36D4AA7f7bE4D33385971BAe75DEe',
-  10: '0x00005EA67Ac36D4AA7f7bE4D33385971BAe75DEe',
-  137: '0x00005EA67Ac36D4AA7f7bE4D33385971BAe75DEe',
-  42161: '0x00005EA67Ac36D4AA7f7bE4D33385971BAe75DEe',
+// Do not trust a single hardcoded SeaDrop address. Newer mainnet OpenSea drops
+// use 0x00005EA00..., while older docs/scripts used 0x00005EA67... (often no code).
+const SEADROP_CANDIDATES: Record<number, string[]> = {
+  1: [
+    '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5',
+    '0x00005ea67ac36d4aa7f7be4d33385971bae75dee',
+  ],
+  8453: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
+  10: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
+  137: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
+  42161: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
 };
+
+async function resolveSeaDropAddress(provider: ethers.Provider, chainId: number, nftContract: string): Promise<string | null> {
+  const candidates = SEADROP_CANDIDATES[chainId] || [];
+  for (const candidate of candidates) {
+    try {
+      const code = await provider.getCode(candidate);
+      if (!code || code === '0x') continue;
+      const seadrop = new Contract(candidate, SEADROP_SCHEDULE_ABI, provider);
+      await seadrop.getPublicDrop(nftContract);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return null;
+}
 
 // Schedule info read from on-chain
 export interface MintScheduleInfo {
@@ -180,7 +202,7 @@ export class MintScheduler {
   async getMintSchedule(contractAddress: string): Promise<MintScheduleInfo> {
     const chainId = this.walletManager.getChainId();
     const provider = this.walletManager.getProvider();
-    const seadropAddress = SEADROP_ADDRESSES[chainId];
+    const seadropAddress = await resolveSeaDropAddress(provider, chainId, contractAddress);
     const now = Math.floor(Date.now() / 1000);
 
     const info: MintScheduleInfo = {
@@ -202,13 +224,13 @@ export class MintScheduler {
           const endTime = Number(publicDrop.endTime);
           info.stages.push({
             stageName: 'public',
-            mintPrice: publicDrop.mintPrice ? ethers.formatEther(publicDrop.mintPrice) : null,
+            mintPrice: publicDrop.mintPrice !== undefined ? ethers.formatEther(publicDrop.mintPrice) : null,
             startTime: startTime > 0 ? startTime : null,
             endTime: endTime > 0 ? endTime : null,
             startTimeISO: startTime > 0 ? new Date(startTime * 1000).toISOString() : null,
             endTimeISO: endTime > 0 ? new Date(endTime * 1000).toISOString() : null,
-            maxPerWallet: Number(publicDrop.maxTotalMintSupplyByWallet) || null,
-            maxSupply: Number(publicDrop.maxTokenSupplyForStage) || null,
+            maxPerWallet: Number(publicDrop.maxTotalMintableByWallet) || null,
+            maxSupply: null,
             isActive: startTime > 0 && startTime <= now && (endTime === 0 || endTime > now),
             isPast: endTime > 0 && endTime <= now,
             isFuture: startTime > 0 && startTime > now,
@@ -219,59 +241,9 @@ export class MintScheduler {
           });
         } catch {}
 
-        // Allowlist drop
-        try {
-          const allowDrop = await seadrop.getAllowListDrop(contractAddress);
-          info.isSeadrop = true;
-          const startTime = Number(allowDrop.startTime);
-          const endTime = Number(allowDrop.endTime);
-          info.stages.push({
-            stageName: 'allowlist',
-            mintPrice: allowDrop.mintPrice ? ethers.formatEther(allowDrop.mintPrice) : null,
-            startTime: startTime > 0 ? startTime : null,
-            endTime: endTime > 0 ? endTime : null,
-            startTimeISO: startTime > 0 ? new Date(startTime * 1000).toISOString() : null,
-            endTimeISO: endTime > 0 ? new Date(endTime * 1000).toISOString() : null,
-            maxPerWallet: Number(allowDrop.maxTotalMintSupplyByWallet) || null,
-            maxSupply: Number(allowDrop.maxTokenSupplyForStage) || null,
-            isActive: startTime > 0 && startTime <= now && (endTime === 0 || endTime > now),
-            isPast: endTime > 0 && endTime <= now,
-            isFuture: startTime > 0 && startTime > now,
-            status: startTime > 0 && startTime <= now && (endTime === 0 || endTime > now) ? 'active'
-              : startTime > 0 && startTime > now ? 'upcoming'
-              : endTime > 0 && endTime <= now ? 'ended'
-              : 'unknown',
-          });
-        } catch {}
-
-        // Try stage indices 0-2
-        for (let i = 0; i < 3; i++) {
-          try {
-            const stageInfo = await seadrop.getDropStageInfo(contractAddress, i);
-            const startTime = Number(stageInfo.startTime);
-            const endTime = Number(stageInfo.endTime);
-            // Skip if same as public drop (same startTime)
-            if (info.stages.some(s => s.startTime === startTime && s.stageName === 'public')) continue;
-            info.isSeadrop = true;
-            info.stages.push({
-              stageName: `stage_${i}`,
-              mintPrice: stageInfo.mintPrice ? ethers.formatEther(stageInfo.mintPrice) : null,
-              startTime: startTime > 0 ? startTime : null,
-              endTime: endTime > 0 ? endTime : null,
-              startTimeISO: startTime > 0 ? new Date(startTime * 1000).toISOString() : null,
-              endTimeISO: endTime > 0 ? new Date(endTime * 1000).toISOString() : null,
-              maxPerWallet: Number(stageInfo.maxTotalMintSupplyByWallet) || null,
-              maxSupply: Number(stageInfo.maxTokenSupplyForStage) || null,
-              isActive: startTime > 0 && startTime <= now && (endTime === 0 || endTime > now),
-              isPast: endTime > 0 && endTime <= now,
-              isFuture: startTime > 0 && startTime > now,
-              status: startTime > 0 && startTime <= now && (endTime === 0 || endTime > now) ? 'active'
-                : startTime > 0 && startTime > now ? 'upcoming'
-                : endTime > 0 && endTime <= now ? 'ended'
-                : 'unknown',
-            });
-          } catch {}
-        }
+        // This schedule reader intentionally only reads PublicDrop for current SeaDrop V1.
+        // Allowlist/signed/token-gated stages are backend/proof dependent and should not be
+        // scheduled as blind public mints. Use browser/OpenSea flow for those.
       } catch {}
     }
 

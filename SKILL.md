@@ -14,6 +14,39 @@ Skill ini menyediakan 16 tools yang bisa dipanggil oleh Hermes agent untuk:
 - Browser-based minting untuk website yang butuh Connect Wallet / server signature
 - Approve & list NFT di OpenSea (dengan diskusi harga terlebih dahulu)
 
+## ⚠️ Competitive / Hot Drop Fast-Mint Runbook
+
+For **auto mint**, **max mint**, **FCFS**, limited supply, or any drop likely to sell out in seconds, use `fast-mint.mjs` instead of `schedule_mint` / browser clicking / agent cron. Agent/tool overhead and live `estimateGas` can add seconds and lose the mint.
+
+### Preflight (no transaction)
+```bash
+cd /root/nft-minting-skill
+node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --status
+```
+
+### Competitive broadcast
+```bash
+node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" \
+  --time auto \
+  --qty max \
+  --wallets 0,1 \
+  --gas-mode aggressive \
+  --priority-gwei 2 \
+  --max-fee-gwei 100 \
+  --early-ms 750
+```
+
+### Mandatory rules learned from PLOP failure
+1. **On-chain SeaDrop data wins.** Always use live `getPublicDrop()` for `mintPrice`, `startTime`, `endTime`, and `maxTotalMintableByWallet`. OpenSea UI/SSR can be stale or wrong.
+2. **Resolve actual SeaDrop minter.** Newer OpenSea mainnet ERC721SeaDrop contracts may use `0x00005EA00Ac477B1030CE78506496e8C2dE24bf5`; skip addresses with no bytecode and verify candidate via `getPublicDrop(nft)`.
+3. **Recompute value at broadcast.** If price changes from `0` to paid, send `value = mintPrice * qty` or skip if it exceeds `MAX_MINT_PRICE_ETH` / wallet balance.
+4. **Fund for upfront gas.** Wallet needs `mintPrice * qty + gasLimit * maxFeePerGas` upfront. Tiny balances lose hot mints even if mint price is zero.
+5. **No live estimate delay.** Fast-mint pre-warms RPC/nonces/gas/feeRecipient and signs raw EIP-1559 transactions; it does not block on `estimateGas` at mint time.
+6. **Aggressive gas by default.** For hot mints use `--gas-mode aggressive`, explicit `--priority-gwei`, and enough ETH. Conservative gas loses placement.
+7. **WIB output.** Schedules/status/results should show `Asia/Jakarta`/WIB times.
+
+Use regular `mint_nft` or `schedule_mint` only for low-competition mints where seconds do not matter.
+
 ## Prasyarat
 
 Skill ini membutuhkan environment variables berikut di `.env`:

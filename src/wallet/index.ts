@@ -16,7 +16,10 @@ export class WalletManager {
   constructor(config: Config) {
     this.config = config;
     const chainId = CHAIN_IDS[config.chain] || 1;
-    this.provider = new ethers.JsonRpcProvider(config.rpcUrl, chainId);
+    // Disable JSON-RPC batching. Some mint-critical RPC providers return
+    // "missing response for request" on batched concurrent calls, which is
+    // unacceptable around drop start time.
+    this.provider = new ethers.JsonRpcProvider(config.rpcUrl, chainId, { batchMaxCount: 1 });
     this.loadWallets();
   }
 
