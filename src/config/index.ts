@@ -63,6 +63,8 @@ export const CHAIN_IDS: Record<string, number> = {
   ethereum: 1, goerli: 5, sepolia: 11155111,
   polygon: 137, arbitrum: 42161, optimism: 10,
   base: 8453, zora: 7777777, blast: 81457,
+  // Testnets
+  'base-sepolia': 84532, 'optimism-sepolia': 11155420, 'arbitrum-sepolia': 421614,
 };
 
 /**

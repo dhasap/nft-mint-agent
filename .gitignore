@@ -15,6 +15,11 @@ dist/
 keys.txt
 wallets.json
 wallets.encrypted.json
+# Testnet burner wallets & local test state (contain private keys / ephemeral data)
+.testnet-wallet*.json
+.burner.json
+.testnet-contract.json
+.fastmint-contracts.json
 
 # Scheduler state
 data/*

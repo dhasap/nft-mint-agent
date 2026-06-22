@@ -54,6 +54,13 @@ export class AutoLister {
       const isApproved = await nft.isApprovedForAll(walletInfo.address, seaportAddress);
       if (isApproved) return { success: true, txHash: null, error: null };
 
+      // BUG FIX: honor DRY_RUN here too. approveSeaport is reachable directly
+      // (and via the approve_seaport tool), so it must not broadcast a real
+      // setApprovalForAll tx when the user asked for a simulation.
+      if (this.config.dryRun) {
+        return { success: true, txHash: '0x_dry_run', error: null };
+      }
+
       const tx = await nft.setApprovalForAll(seaportAddress, true);
       const receipt = await tx.wait(1);
       return { success: true, txHash: tx.hash, error: null };

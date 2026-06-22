@@ -201,12 +201,40 @@ export class DirectMinter {
           return result;
         }
 
-        const tx = await contract[funcName](...args, {
+        // BUG FIX (false-negative on load-balanced public RPCs): build + sign +
+        // broadcast the tx ourselves so we ALWAYS know its hash. Public RPC
+        // endpoints are load-balanced and sometimes retry eth_sendRawTransaction
+        // internally; the duplicate returns "already known" / "nonce too low"
+        // even though the tx was accepted. The old code let that surface as a
+        // hard failure, reporting "Gagal" for a mint that actually succeeded on
+        // chain (risking a confused user double-minting). We now treat those as
+        // "already submitted" and wait for the receipt by the known hash.
+        const provider = this.walletManager.getProvider();
+        const txReq = await contract[funcName].populateTransaction(...args, {
           value, maxFeePerGas, maxPriorityFeePerGas, gasLimit: estimatedGas,
         });
-        result.txHash = tx.hash;
+        const populated = await wi.nonceManager.populateTransaction(txReq);
+        populated.from = undefined; // Wallet.signTransaction rejects a populated `from`
+        const signed = await wi.wallet.signTransaction(populated);
+        const expectedHash = ethers.keccak256(signed);
+        result.txHash = expectedHash;
+        // We bypassed nonceManager.sendTransaction, so advance its managed nonce
+        // manually to keep subsequent txs (long-running hosts) in sync.
+        wi.nonceManager.increment();
 
-        const receipt = await tx.wait(1);
+        try {
+          await provider.broadcastTransaction(signed);
+        } catch (sendErr: any) {
+          const m = (sendErr?.message || '').toLowerCase();
+          const alreadySubmitted =
+            m.includes('already known') || m.includes('already exists') ||
+            m.includes('known transaction') || m.includes('nonce too low') ||
+            m.includes('replacement transaction underpriced');
+          if (!alreadySubmitted) throw sendErr; // genuine broadcast failure
+          // else: tx already in mempool/mined — fall through and wait on the hash.
+        }
+
+        const receipt = await provider.waitForTransaction(expectedHash, 1, 180_000);
         if (receipt && receipt.status === 1) {
           result.success = true;
           result.gasUsed = receipt.gasUsed.toString();

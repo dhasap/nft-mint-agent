@@ -424,7 +424,12 @@ async function main() {
     retry(() => nft.maxSupply(), 'maxSupply').catch(() => 0n),
   ]);
 
-  let feeRecipient = args['fee-recipient'] ? ethers.getAddress(args['fee-recipient']) : (feeRecipients?.[0] || '0x0000a26b00c1F0DF003000390027140000fAa719');
+  // BUG FIX: getAllowedFeeRecipients returns an ethers Result. For unrestricted
+  // drops it's EMPTY, and ethers v6 throws RangeError ("out of result range") on
+  // out-of-bounds index access — so `feeRecipients?.[0]` crashes the whole mint
+  // instead of yielding undefined. Guard with a length check.
+  const firstAllowedFeeRecipient = (feeRecipients && feeRecipients.length > 0) ? feeRecipients[0] : undefined;
+  let feeRecipient = args['fee-recipient'] ? ethers.getAddress(args['fee-recipient']) : (firstAllowedFeeRecipient || '0x0000a26b00c1F0DF003000390027140000fAa719');
   if (drop.restrictFeeRecipients) {
     const ok = await retry(() => sea.getFeeRecipientIsAllowed(nftContract, feeRecipient), 'feeRecipient allowed').catch(() => false);
     if (!ok) throw new Error(`Fee recipient ${feeRecipient} tidak allowed; allowed=${feeRecipients.join(',')}`);
@@ -708,7 +713,7 @@ async function main() {
       console.log(`✅ Wallet ${r.index} ${shortAddr(r.address)}`);
       console.log(`   Qty       : ${r.qty}`);
       console.log(`   TX        : ${r.txHash}`);
-      console.log(`   Etherscan : https://etherscan.io/tx/${r.txHash}`);
+      console.log(`   Explorer  : ${explorerTxUrl(chainId, r.txHash)}`);
       console.log(`   Block     : ${r.receipt.blockNumber}`);
       console.log(`   Gas used  : ${r.receipt.gasUsed.toString()}`);
       if (r.attempts) console.log(`   Attempts  : ${r.attempts} (incl. RBF)`);
@@ -723,6 +728,20 @@ async function main() {
   }
   console.log(line() + '\n');
   if (!ok.length) process.exitCode = 1;
+}
+
+// BUG FIX: was hardcoded to etherscan.io regardless of chain, producing wrong
+// links for L2s/testnets (e.g. a Base Sepolia tx pointed at Ethereum mainnet).
+function explorerTxUrl(chainId, txHash) {
+  const EXPLORERS = {
+    1: 'https://etherscan.io', 11155111: 'https://sepolia.etherscan.io',
+    137: 'https://polygonscan.com', 42161: 'https://arbiscan.io', 421614: 'https://sepolia.arbiscan.io',
+    10: 'https://optimistic.etherscan.io', 11155420: 'https://sepolia-optimism.etherscan.io',
+    8453: 'https://basescan.org', 84532: 'https://sepolia.basescan.org',
+    7777777: 'https://explorer.zora.energy', 81457: 'https://blastscan.io',
+  };
+  const base = EXPLORERS[chainId] || 'https://etherscan.io';
+  return `${base}/tx/${txHash}`;
 }
 
 main().catch((e) => {

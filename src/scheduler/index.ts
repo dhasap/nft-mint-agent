@@ -120,6 +120,34 @@ export class MintScheduler {
   private timers: Map<string, NodeJS.Timeout> = new Map();
   private jobCounter = 0;
 
+  // BUG-002 FIX: Node's setTimeout uses a 32-bit signed int for the delay.
+  // Any delay > 2^31-1 ms (~24.8 days) overflows and fires (almost) immediately,
+  // which would execute a far-future scheduled mint right away. Chunk long delays.
+  private static readonly MAX_TIMER_MS = 2_147_483_647;
+
+  /**
+   * Arm a timer for `delay` ms that calls executeJob(jobId), safely handling
+   * delays beyond Node's 32-bit setTimeout limit by re-arming in chunks.
+   */
+  private armTimer(jobId: string, delay: number): void {
+    if (delay > MintScheduler.MAX_TIMER_MS) {
+      const timer = setTimeout(() => {
+        // Re-arm with the remaining delay (recurses until within the safe range).
+        this.armTimer(jobId, delay - MintScheduler.MAX_TIMER_MS);
+      }, MintScheduler.MAX_TIMER_MS);
+      // unref so a pending background timer never blocks a short-lived CLI/runner
+      // process from exiting. Long-lived hosts (MCP server) stay alive via their transport.
+      timer.unref?.();
+      this.timers.set(jobId, timer);
+    } else {
+      const timer = setTimeout(() => {
+        this.executeJob(jobId);
+      }, delay);
+      timer.unref?.();
+      this.timers.set(jobId, timer);
+    }
+  }
+
   constructor(config: Config, walletManager: WalletManager) {
     this.config = config;
     this.walletManager = walletManager;
@@ -181,11 +209,8 @@ export class MintScheduler {
             job.error = 'Scheduled time passed while agent was offline';
             console.log(`[MintScheduler] Job ${job.id} missed (expired while offline)`);
           } else {
-            // Re-schedule
-            const timer = setTimeout(() => {
-              this.executeJob(job.id);
-            }, delay);
-            this.timers.set(job.id, timer);
+            // Re-schedule (BUG-002 FIX: chunk long delays)
+            this.armTimer(job.id, delay);
             console.log(`[MintScheduler] Re-scheduled job ${job.id} — fires in ${Math.round(delay / 1000)}s`);
           }
         }
@@ -337,11 +362,8 @@ export class MintScheduler {
       // Execute immediately
       this.executeJob(id);
     } else {
-      // Schedule for later
-      const timer = setTimeout(() => {
-        this.executeJob(id);
-      }, delay);
-      this.timers.set(id, timer);
+      // Schedule for later (BUG-002 FIX: chunk long delays past setTimeout's 32-bit limit)
+      this.armTimer(id, delay);
     }
 
     // BUG-001 FIX: Persist after every change
