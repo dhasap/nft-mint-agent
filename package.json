@@ -1,6 +1,6 @@
 {
   "name": "nft-mint-agent",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "description": "Competitive multi-wallet NFT auto-minting agent for OpenSea/SeaDrop and direct contracts. Low-latency fast-mint (raw EIP-1559, multi-RPC fan-out, RBF), scheduled drops, browser fallback, and listing. Runs as an MCP server, a Hermes/Claude agent skill, or a standalone CLI.",
   "keywords": [
     "nft",
@@ -59,15 +59,15 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "ethers": "^6.13.0",
-    "dotenv": "^16.4.5",
     "axios": "^1.7.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "ts-node": "^10.9.2",
     "@types/node": "^20.14.0",
-    "vitest": "^1.6.0"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.9"
   }
 }

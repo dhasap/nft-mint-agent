@@ -23,9 +23,81 @@
  * Current mitigation: Use isolated Browserbase instances, destroy after use.
  */
 
+import { ethers } from 'ethers';
 import { Config } from '../config';
 import { WalletManager, WalletInfo } from '../wallet';
 import { shortAddress } from '../utils';
+
+/**
+ * SECURITY (hardened injected provider):
+ * Function selectors that can move or approve assets OUT of the wallet. The
+ * injected provider refuses to sign/send these so a malicious or compromised
+ * minting page (or an XSS / CDN compromise) cannot drain the wallet. A normal
+ * mint never needs any of these.
+ */
+export const DANGEROUS_SELECTORS: Record<string, string> = {
+  '0xa22cb465': 'setApprovalForAll',
+  '0x095ea7b3': 'approve',
+  '0xa9059cbb': 'transfer',
+  '0x23b872dd': 'transferFrom',
+  '0x42842e0e': 'safeTransferFrom',
+  '0xb88d4fde': 'safeTransferFrom(bytes)',
+  '0x39509351': 'increaseAllowance',
+  '0xd505accf': 'permit',
+};
+
+// Pinned ethers UMD build + Subresource Integrity hash. Loading by exact
+// version with `integrity` means a tampered/compromised CDN file is rejected
+// by the browser instead of executing with access to the private key.
+export const ETHERS_CDN_URL = 'https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js';
+export const ETHERS_SRI = 'sha384-6Zl0Pc8zjSz8KvmNeXRvUQgY4ryFb+BwDvKCmLYcBME0joAaru491tQgi9B7zsMM';
+
+/**
+ * Build the in-page guard JS embedded into every injected provider. Enforces:
+ *  - tx.to allowlist (when provided),
+ *  - blocked dangerous selectors (approvals/transfers),
+ *  - per-tx value cap (wei),
+ *  - typed-data signing disabled by default (Seaport orders/permits can
+ *    authorize asset transfers).
+ */
+export function buildTxGuardJs(maxValueWei: bigint, allowedTo: string[], allowOrderSigning: boolean): string {
+  const allow = JSON.stringify(allowedTo.map(a => a.toLowerCase()));
+  const danger = JSON.stringify(DANGEROUS_SELECTORS);
+  return `
+  // ===== Injected-provider safety guard (do not remove) =====
+  const __MAX_VALUE_WEI = BigInt('${maxValueWei.toString()}');
+  const __ALLOWED_TO = ${allow};
+  const __DANGEROUS_SELECTORS = ${danger};
+  const __ALLOW_TYPED_DATA = ${allowOrderSigning ? 'true' : 'false'};
+  function __toBig(v) {
+    if (v === undefined || v === null || v === '') return 0n;
+    if (typeof v === 'bigint') return v;
+    if (typeof v === 'number') return BigInt(Math.trunc(v));
+    return BigInt(v); // handles '0x..' and decimal strings
+  }
+  function __assertSafeTx(tx) {
+    const to = (tx && tx.to ? String(tx.to) : '').toLowerCase();
+    if (__ALLOWED_TO.length && to && !__ALLOWED_TO.includes(to)) {
+      throw new Error('[WalletInject] BLOCKED: destination ' + to + ' is not in the allowed mint-contract list.');
+    }
+    const data = String((tx && (tx.data || tx.input)) || '0x');
+    const selector = data.slice(0, 10).toLowerCase();
+    if (__DANGEROUS_SELECTORS[selector]) {
+      throw new Error('[WalletInject] BLOCKED dangerous call ' + __DANGEROUS_SELECTORS[selector] + ' (' + selector + '): this could drain the wallet and is never required to mint.');
+    }
+    const v = __toBig(tx ? tx.value : 0n);
+    if (v > __MAX_VALUE_WEI) {
+      throw new Error('[WalletInject] BLOCKED: tx value ' + v.toString() + ' wei exceeds the configured cap ' + __MAX_VALUE_WEI.toString() + ' wei.');
+    }
+    return tx;
+  }
+  function __assertTypedDataAllowed() {
+    if (!__ALLOW_TYPED_DATA) {
+      throw new Error('[WalletInject] BLOCKED: typed-data signing is disabled (a Seaport order / permit signature can authorize asset transfers). Re-generate with allowOrderSigning=true only if you trust the page.');
+    }
+  }
+`;
+}
 
 // --- Result Types ---
 
@@ -53,6 +125,12 @@ export function generateBrowserMintScripts(
   options: {
     url: string;
     walletIndices?: number[];
+    /** Restrict eth_sendTransaction to these contract address(es). Empty = any (selector blocklist still applies). */
+    allowedContracts?: string[];
+    /** Per-tx value cap in ETH. Defaults to config.maxMintPriceEth. */
+    maxTxValueEth?: number;
+    /** Allow eth_signTypedData_* (Seaport orders / permits). Default false. */
+    allowOrderSigning?: boolean;
   }
 ): BrowserMintResult {
   const wallets = walletManager.getAllWallets();
@@ -60,6 +138,13 @@ export function generateBrowserMintScripts(
   const chainId = walletManager.getChainId();
   const chainIdHex = '0x' + chainId.toString(16);
   const indicesToUse = options.walletIndices || wallets.map(w => w.index);
+
+  // Safety guard parameters shared by all injected scripts.
+  const allowedTo = (options.allowedContracts || []).filter(a => /^0x[a-fA-F0-9]{40}$/.test(a));
+  const maxTxValueEth = options.maxTxValueEth ?? config.maxMintPriceEth;
+  const maxValueWei = ethers.parseEther(String(maxTxValueEth || 0));
+  const allowOrderSigning = options.allowOrderSigning === true;
+  const guardJs = buildTxGuardJs(maxValueWei, allowedTo, allowOrderSigning);
 
   const result: BrowserMintResult = {
     url: options.url,
@@ -80,7 +165,7 @@ export function generateBrowserMintScripts(
     const wallet = wallets.find(w => w.index === idx);
     if (!wallet) continue;
 
-    const script = generateSingleWalletScript(wallet, rpcUrl, chainId, chainIdHex);
+    const script = generateSingleWalletScript(wallet, rpcUrl, chainId, chainIdHex, guardJs);
 
     result.walletScripts.push({
       walletIndex: idx,
@@ -95,6 +180,14 @@ export function generateBrowserMintScripts(
     rpcUrl,
     chainId,
     chainIdHex,
+    guardJs,
+  );
+
+  result.warnings.push(
+    allowedTo.length
+      ? `Injected provider restricted to contracts: ${allowedTo.join(', ')}.`
+      : 'Injected provider allows any destination, but blocks approval/transfer selectors and caps tx value.',
+    `Per-tx value cap: ${maxTxValueEth} ETH. Typed-data (order) signing: ${allowOrderSigning ? 'ENABLED' : 'disabled'}.`,
   );
 
   // Generate auto-click script
@@ -115,6 +208,7 @@ function generateSingleWalletScript(
   rpcUrl: string,
   chainId: number,
   chainIdHex: string,
+  guardJs: string,
 ): string {
   return `// === Wallet Injection Script (Wallet ${wallet.index}: ${shortAddress(wallet.address)}) ===
 // Jalankan via browser_console() setelah navigasi ke website minting
@@ -126,7 +220,8 @@ function generateSingleWalletScript(
   // 1. Load ethers.js v6 from CDN (if not already loaded)
   if (!window.ethers) {
     const s = document.createElement('script');
-    s.src = 'https://cdn.ethers.io/lib/ethers-6.13.4.umd.min.js';
+    s.src = '${ETHERS_CDN_URL}';
+    s.integrity = '${ETHERS_SRI}';
     s.crossOrigin = 'anonymous';
     document.head.appendChild(s);
     await new Promise((resolve, reject) => {
@@ -140,6 +235,7 @@ function generateSingleWalletScript(
   const provider = new ethers.JsonRpcProvider('${rpcUrl}');
   const wallet = new ethers.Wallet('${wallet.wallet.privateKey}', provider);
   console.log('[WalletInject] Wallet ready:', wallet.address);
+${guardJs}
 
   // 3. Store for cleanup
   if (!window.__walletSessions) window.__walletSessions = {};
@@ -210,7 +306,8 @@ function generateSingleWalletScript(
               tx.value = BigInt(tx.value);
             }
 
-            console.log('[WalletInject] Sending TX:', JSON.stringify({ to: tx.to, value: tx.value?.toString(), data: tx.data?.slice(0, 66) }));
+            __assertSafeTx(tx);
+            console.log('[WalletInject] Sending TX:', JSON.stringify({ to: tx.to, value: tx.value?.toString(), data: tx.data?.slice(0, 10) }));
             const txResponse = await wallet.sendTransaction(tx);
             console.log('[WalletInject] TX sent:', txResponse.hash);
             return txResponse.hash;
@@ -230,6 +327,7 @@ function generateSingleWalletScript(
           case 'eth_signTypedData_v4':
           case 'eth_signTypedData_v3':
           case 'eth_signTypedData': {
+            __assertTypedDataAllowed();
             const [, typedDataStr] = params || [];
             const typedData = typeof typedDataStr === 'string' ? JSON.parse(typedDataStr) : typedDataStr;
 
@@ -366,6 +464,7 @@ function generateMultiWalletScript(
   rpcUrl: string,
   chainId: number,
   chainIdHex: string,
+  guardJs: string,
 ): string {
   const walletConfigs = wallets.map(w => ({
     index: w.index,
@@ -388,7 +487,8 @@ function generateMultiWalletScript(
   // Load ethers.js
   if (!window.ethers) {
     const s = document.createElement('script');
-    s.src = 'https://cdn.ethers.io/lib/ethers-6.13.4.umd.min.js';
+    s.src = '${ETHERS_CDN_URL}';
+    s.integrity = '${ETHERS_SRI}';
     s.crossOrigin = 'anonymous';
     document.head.appendChild(s);
     await new Promise((resolve, reject) => {
@@ -400,6 +500,7 @@ function generateMultiWalletScript(
   const provider = new ethers.JsonRpcProvider('${rpcUrl}');
   const wallets = ${JSON.stringify(walletConfigs)};
   const results = [];
+${guardJs}
 
   window.__multiMintResults = results;
 
@@ -435,6 +536,7 @@ function generateMultiWalletScript(
               const tx = { ...params?.[0] } || {};
               tx.from = w.address;
               if (tx.value && typeof tx.value === 'string') tx.value = BigInt(tx.value);
+              __assertSafeTx(tx);
               const txResp = await wallet.sendTransaction(tx);
               console.log(\`[MultiMint] TX sent: \${txResp.hash}\`);
               return txResp.hash;
@@ -447,6 +549,7 @@ function generateMultiWalletScript(
             case 'eth_signTypedData_v4':
             case 'eth_signTypedData_v3':
             case 'eth_signTypedData': {
+              __assertTypedDataAllowed();
               const [, tdStr] = params || [];
               const td = typeof tdStr === 'string' ? JSON.parse(tdStr) : tdStr;
               const types = { ...td.types };
@@ -734,7 +837,9 @@ export function generateMintDetectionScript(contractAddress: string): string {
 (async () => {
   if (!window.ethers) {
     const s = document.createElement('script');
-    s.src = 'https://cdn.ethers.io/lib/ethers-6.13.4.umd.min.js';
+    s.src = '${ETHERS_CDN_URL}';
+    s.integrity = '${ETHERS_SRI}';
+    s.crossOrigin = 'anonymous';
     document.head.appendChild(s);
     await new Promise(r => { s.onload = r; });
   }

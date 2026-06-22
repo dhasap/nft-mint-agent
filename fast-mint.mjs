@@ -23,6 +23,8 @@
  * New flags:
  *   --priority-gwei <n>      Priority (tip) fee. Defaults are now mode-scaled & higher.
  *   --max-fee-gwei <n>       Hard cap for maxFeePerGas.
+ *   --max-price-eth <n>      Hard cap for per-unit mint price (aborts if exceeded).
+ *                            Defaults to MAX_MINT_PRICE_ETH env or 0.5 ETH.
  *   --rbf-after-ms <n>       Re-broadcast with bumped gas if unmined after this (default 13000 = ~1 ETH block).
  *   --rbf-max <n>            Max RBF bumps per wallet (default 4).
  *   --rbf-bump <f>           Gas bump factor per RBF (default 1.18 = +18%).
@@ -444,6 +446,11 @@ async function main() {
   const rbfAfterMs = Number(args['rbf-after-ms'] ?? process.env.FAST_MINT_RBF_AFTER_MS ?? 13000);
   const rbfMax = Number(args['rbf-max'] ?? process.env.FAST_MINT_RBF_MAX ?? 4);
   const rbfBump = Number(args['rbf-bump'] ?? process.env.FAST_MINT_RBF_BUMP ?? 1.18);
+  // SECURITY: per-unit mint price cap. Mirrors MAX_MINT_PRICE_ETH used by the
+  // agent/MCP path so the competitive CLI can't silently overpay for a drop
+  // whose on-chain price is inflated or changes at the last second.
+  const maxPriceEth = Number(args['max-price-eth'] ?? process.env.MAX_MINT_PRICE_ETH ?? 0.5);
+  const maxPriceWei = ethers.parseEther(String(Number.isFinite(maxPriceEth) ? maxPriceEth : 0.5));
   const qtyArg = String(args.qty ?? args.quantity ?? '1').toLowerCase();
   const stageName = args.stage || name;
   let latestDrop = drop;
@@ -468,7 +475,10 @@ async function main() {
   console.log(`🌊 SeaDrop        : ${seadropAddress}`);
   console.log(`📡 Broadcast RPCs : ${bcEndpoints.length} endpoint(s)`);
   console.log(`🔁 RBF            : after ${rbfAfterMs}ms, max ${rbfMax}x, bump ${Math.round((rbfBump - 1) * 100)}%`);
-  console.log(`💸 Live price     : ${ethers.formatEther(drop.mintPrice)} ETH`);
+  console.log(`💸 Live price     : ${ethers.formatEther(drop.mintPrice)} ETH (cap ${maxPriceEth} ETH)`);
+  if (drop.mintPrice > maxPriceWei) {
+    throw new Error(`Live mint price ${ethers.formatEther(drop.mintPrice)} ETH exceeds MAX_MINT_PRICE_ETH (${maxPriceEth} ETH). Aborting. Raise the cap with --max-price-eth or MAX_MINT_PRICE_ETH if intended.`);
+  }
   console.log(`🎒 Max/wallet     : ${Number(drop.maxTotalMintableByWallet)}`);
   console.log(`📊 Supply         : ${totalSupply.toString()} / ${maxSupply.toString() || '?'}`);
   console.log(`⛽ Gas mode       : ${gas.mode} | maxFee ${gwei(gas.maxFeePerGas)} gwei | prio ${gwei(gas.maxPriorityFeePerGas)} gwei | cap ${gwei(gas.cap)} gwei`);
@@ -549,6 +559,12 @@ async function main() {
   //    Only network broadcast remains for T0 — signing (local CPU) is done up front.
   const liveMaxPerWallet = Number(latestDrop.maxTotalMintableByWallet) || Number(drop.maxTotalMintableByWallet) || 1;
   const livePrice = BigInt(latestDrop.mintPrice);
+  // SECURITY: re-check the cap against the freshest on-chain price right before
+  // we pre-sign/broadcast (price can change after startup).
+  if (livePrice > maxPriceWei) {
+    polling = false;
+    throw new Error(`Live mint price at T0 ${ethers.formatEther(livePrice)} ETH exceeds MAX_MINT_PRICE_ETH (${maxPriceEth} ETH). Aborting before broadcast.`);
+  }
   const liveGas = gasParamsFrom(latestBlock?.baseFeePerGas, latestFeeData, {
     gasMode: args['gas-mode'], maxFeeGwei: args['max-fee-gwei'], priorityGwei: args['priority-gwei'],
   });

@@ -29,7 +29,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { TOOLS, SKILL_DEFINITION } from './dist/tools/index.js';
 
-const VERSION = '3.3.0';
+const VERSION = '3.4.0';
 
 // Read-only tools: no signing, no broadcast, no spend, no state change.
 const READONLY_TOOLS = new Set([

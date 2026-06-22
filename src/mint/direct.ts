@@ -148,6 +148,13 @@ export class DirectMinter {
       };
 
       try {
+        // SECURITY (defense-in-depth): enforce the per-unit mint price cap here
+        // too. DirectMinter is exported and may be called without going through
+        // the tool layer, so it must not rely on callers to check MAX_MINT_PRICE_ETH.
+        if (parseFloat(mintPrice) > this.config.maxMintPriceEth) {
+          result.error = `Mint price ${mintPrice} ETH exceeds MAX_MINT_PRICE_ETH (${this.config.maxMintPriceEth} ETH)`;
+          return result;
+        }
         const contract = new Contract(contractAddress, abi, wi.nonceManager);
         const value = ethers.parseEther(mintPrice) * BigInt(quantity);
 

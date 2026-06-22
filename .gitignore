@@ -14,6 +14,7 @@ dist/
 *.key
 keys.txt
 wallets.json
+wallets.encrypted.json
 
 # Scheduler state
 data/*

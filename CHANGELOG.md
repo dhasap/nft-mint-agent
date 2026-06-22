@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning follows [SemVer](https://semver.org/).
 
+## [3.4.0] - 2026-06-22
+
+### Security
+- **Browser injected provider hardened** (`src/browser/inject.ts`). The injected EIP-1193 provider previously signed/sent *any* request from the page. It now:
+  - blocks asset-moving selectors (`setApprovalForAll`, `approve`, `transfer`, `transferFrom`, `safeTransferFrom`, `increaseAllowance`, `permit`) — common wallet-drain vectors;
+  - enforces a per-tx **value cap** (defaults to `MAX_MINT_PRICE_ETH`);
+  - supports an optional **destination contract allowlist**;
+  - **disables typed-data signing by default** (Seaport orders/permits can authorize transfers) — opt in via `allowOrderSigning`;
+  - loads `ethers` from a **pinned CDN with Subresource Integrity (SRI)** instead of an unpinned URL.
+- **`fast-mint.mjs` now enforces `MAX_MINT_PRICE_ETH`** (new `--max-price-eth` flag), checked at startup and again against the freshest on-chain price right before broadcast. Previously the competitive CLI had no price cap.
+- **`DirectMinter.mint()`** enforces the price cap internally (defense-in-depth) instead of relying solely on the tool layer.
+- **Wallet generation** (`src/wallet/generate.ts`) no longer prints private keys to stdout, writes output with `0600` permissions, and supports an **encrypted JSON keystore** (password via arg or `WALLET_ENCRYPT_PASSWORD`).
+- **Dependencies**: upgraded to clear all advisories (`ws`, `form-data`, and dev-chain `esbuild`/`vite`/`vitest`). `npm audit` now reports **0 vulnerabilities**.
+
+### Added
+- 15 new security unit tests (`tests/security.test.ts`) executing the actual injected guard logic, the `DirectMinter` price cap, and a `fast-mint` cap regression check (43 tests total).
+
 ## [3.3.0] - 2026-06-22
 
 ### Added
