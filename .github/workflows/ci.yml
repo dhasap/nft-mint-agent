@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - name: Type-check & build
+        run: npm run build
+      - name: Syntax-check CLI runners
+        run: |
+          node --check runner.mjs
+          node --check fast-mint.mjs
+          node --check plop-auto-mint.mjs
+      - name: Secret scan (no raw private keys committed)
+        run: |
+          if git grep -nE "0x[a-fA-F0-9]{64}" -- . ':!*.lock' ':!package-lock.json'; then
+            echo "::error::Possible private key committed"; exit 1; fi
