@@ -1,7 +1,7 @@
 ---
 name: nft-minting
 description: "NFT auto-minting toolkit: direct contract minting, OpenSea/SeaDrop public minting, competitive fast-mint raw-TX path, multi-wallet, scheduled minting, browser fallback, health checks, post-mint verification, and OpenSea listing. For hot/FCFS/max mints use fast-mint.mjs, NOT schedule_mint/browser clicking. Available as an MCP server, a CLI runner, and an agent skill."
-version: 3.3.0
+version: 3.4.0
 author: dhasap
 metadata:
   hermes:
@@ -11,7 +11,7 @@ metadata:
       commands: [node]
 ---
 
-# NFT Minting Skill (Auto Mint Agent) v3.3
+# NFT Minting Skill (Auto Mint Agent) v3.4
 
 Multi-wallet NFT minter + OpenSea/SeaDrop support + scheduled minting + browser fallback +
 listing helpers + a **competitive fast-mint raw transaction path**. Runs as an **MCP server**,

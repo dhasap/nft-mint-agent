@@ -1,4 +1,4 @@
-# AGENT.md — Auto Mint Agent Instructions v3.1
+# AGENT.md — Auto Mint Agent Instructions v3.4
 
 > 🧭 New here? Start with **[SKILL.md](SKILL.md)** (decision tree) and **[docs/QUICKSTART.md](docs/QUICKSTART.md)** (copy-paste recipes). MCP setup: **[docs/MCP.md](docs/MCP.md)**.
 
