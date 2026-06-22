@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 /**
- * Competitive SeaDrop fast-mint runner.
+ * Competitive SeaDrop fast-mint runner (v2 — low-latency).
  *
- * Goals:
+ * Latency optimizations vs v1:
+ * - PRE-SIGN in parallel BEFORE target time (only network I/O happens at T0).
+ * - MULTI-RPC fan-out broadcast (send raw tx to every RPC at once, first win).
+ * - RBF auto re-broadcast: if a tx is not mined within N ms, bump gas (same nonce) and resend.
+ * - CLOCK calibration against RPC server `Date` header so broadcast timing matches real time.
+ * - Higher, mode-scaled priority fee so the tx is ordered near the front of the block.
+ *
+ * Goals (unchanged):
  * - No agent/scheduler/estimateGas delay at mint time.
  * - Use live on-chain SeaDrop price/max, not stale OpenSea UI/SSR.
- * - Pre-warm RPC, nonces, balances, fee recipient, and keep latest drop/gas cached.
- * - Sign raw EIP-1559 transactions and broadcast in parallel at target time.
  * - Never silently lower gas to fit low wallet balance; skip/warn instead.
  * - Output all times in WIB (Asia/Jakarta).
  *
@@ -14,6 +19,17 @@
  *   node fast-mint.mjs --contract 0xNFT --time 2026-06-07T16:00:51Z --qty max --wallets 0,1
  *   node fast-mint.mjs --url https://opensea.io/collection/plop-fun/overview --time auto --qty max --gas-mode aggressive
  *   node fast-mint.mjs --contract 0xNFT --status
+ *
+ * New flags:
+ *   --priority-gwei <n>      Priority (tip) fee. Defaults are now mode-scaled & higher.
+ *   --max-fee-gwei <n>       Hard cap for maxFeePerGas.
+ *   --rbf-after-ms <n>       Re-broadcast with bumped gas if unmined after this (default 13000 = ~1 ETH block).
+ *   --rbf-max <n>            Max RBF bumps per wallet (default 4).
+ *   --rbf-bump <f>           Gas bump factor per RBF (default 1.18 = +18%).
+ *   --presign-lead-ms <n>    How early to pre-sign attempt #1 before broadcast (default 1500).
+ *   --no-clock-sync          Disable RPC clock calibration.
+ *   --clock-offset-ms <n>    Manual clock offset (serverTime - localTime), overrides calibration.
+ *   --broadcast-rpcs a,b,c   Extra RPC URLs for fan-out broadcast (or env BROADCAST_RPC_URLS).
  */
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
@@ -130,8 +146,81 @@ function parseList(s, fallback) {
   if (s === undefined || s === true || s === '') return fallback;
   return String(s).split(',').map(x => x.trim()).filter(Boolean).map(Number);
 }
+function parseStrList(s, fallback) {
+  if (s === undefined || s === true || s === '') return fallback;
+  return String(s).split(',').map(x => x.trim()).filter(Boolean);
+}
 function min(a, b) { return a < b ? a : b; }
 function max(a, b) { return a > b ? a : b; }
+
+// ── Clock calibration ────────────────────────────────────────────────────────
+// Measures offset between local wall-clock and the RPC server's clock (NTP-synced
+// in practice) using the HTTP `Date` response header, compensating for RTT/2.
+// Returns offsetMs where realTime ≈ Date.now() + offsetMs.
+async function calibrateClock(rpcUrl, samples = 6) {
+  const offsets = [];
+  for (let i = 0; i < samples; i++) {
+    const t0 = Date.now();
+    try {
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: i, method: 'eth_blockNumber', params: [] }),
+      });
+      const t1 = Date.now();
+      const dateHdr = res.headers.get('date');
+      if (!dateHdr) continue;
+      const serverMs = Date.parse(dateHdr);
+      if (Number.isNaN(serverMs)) continue;
+      // Server header is whole-second; midpoint of request window approximates serverMs.
+      const localMid = (t0 + t1) / 2;
+      offsets.push(serverMs - localMid);
+      await res.text().catch(() => {});
+    } catch {}
+    await sleep(60);
+  }
+  if (offsets.length < 3) return { offsetMs: 0, samples: offsets.length, ok: false };
+  offsets.sort((a, b) => a - b);
+  // median (robust to outliers)
+  const median = offsets[Math.floor(offsets.length / 2)];
+  return { offsetMs: Math.round(median), samples: offsets.length, ok: true };
+}
+
+// ── Multi-RPC broadcast fan-out ──────────────────────────────────────────────
+function makeBroadcastProviders(primaryUrl) {
+  const extra = parseStrList(args['broadcast-rpcs'] ?? process.env.BROADCAST_RPC_URLS, []);
+  const urls = [primaryUrl, ...extra].filter((u, i, arr) => u && arr.indexOf(u) === i);
+  return urls.map(u => ({ url: u, provider: new ethers.JsonRpcProvider(u, undefined, { batchMaxCount: 1 }) }));
+}
+
+// Treats "already known / nonce too low / replacement underpriced" as a soft-success:
+// the tx (or a better one) is already in flight, so we keep the hash we have.
+function isBenignBroadcastErr(msg) {
+  return /already known|alreadyknown|nonce too low|replacement transaction underpriced|known transaction/i.test(msg || '');
+}
+
+async function broadcastFanout(providers, raw, expectedHash, label) {
+  const attempts = providers.map(({ url, provider }) =>
+    provider.broadcastTransaction(raw)
+      .then(resp => ({ ok: true, hash: resp.hash, url }))
+      .catch(e => {
+        const msg = decodeErr(e);
+        if (isBenignBroadcastErr(msg)) return { ok: true, hash: expectedHash, url, benign: true, msg };
+        return { ok: false, url, msg };
+      })
+  );
+  // Resolve as soon as any RPC accepts it.
+  return new Promise((resolve) => {
+    let settled = 0; let firstErr = null;
+    for (const p of attempts) {
+      p.then(r => {
+        if (r.ok) return resolve(r);
+        firstErr = firstErr || r;
+        if (++settled === attempts.length) resolve(firstErr || { ok: false, msg: 'all RPCs failed' });
+      });
+    }
+  });
+}
 
 async function resolveContract(input, apiKey) {
   if (!input) throw new Error('Butuh --contract 0x... atau --url OpenSea collection');
@@ -171,10 +260,13 @@ async function resolveSeaDrop(provider, chainId, nftContract) {
 
 function gasParamsFrom(baseFee, feeData, opts) {
   const capGwei = opts.maxFeeGwei || process.env.MAX_GAS_PRICE_GWEI || '100';
-  const priorityGwei = opts.priorityGwei || process.env.PRIORITY_FEE_GWEI || '2';
+  // Mode-scaled, higher default priority. Hot drops need a competitive tip to be
+  // ordered near the front of the block — 2 gwei is far too low for FCFS mints.
+  const mode = String(opts.gasMode || process.env.GAS_MODE || 'aggressive').toLowerCase();
+  const defaultPriorityByMode = { eco: '1', normal: '2', aggressive: '5', custom: process.env.CUSTOM_PRIORITY_GWEI || '5' };
+  const priorityGwei = opts.priorityGwei || process.env.PRIORITY_FEE_GWEI || defaultPriorityByMode[mode] || '5';
   const cap = ethers.parseUnits(String(capGwei), 'gwei');
   const priorityBase = ethers.parseUnits(String(priorityGwei), 'gwei');
-  const mode = String(opts.gasMode || process.env.GAS_MODE || 'aggressive').toLowerCase();
   const mult = mode === 'eco' ? 1.25 : mode === 'normal' ? 2 : mode === 'custom'
     ? Number(process.env.CUSTOM_GAS_MULTIPLIER || '3') : 4;
   const rawBase = baseFee || feeData.gasPrice || ethers.parseUnits('20', 'gwei');
@@ -185,6 +277,16 @@ function gasParamsFrom(baseFee, feeData, opts) {
   priority = min(priority, maxFee > rawBase ? maxFee - rawBase : maxFee);
   if (priority <= 0n) priority = 1n;
   return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority, mode, cap };
+}
+
+// Bump gas for replace-by-fee. EIP-1559 nodes require BOTH maxFee and priority to
+// rise by >=10%; we use the requested factor (default +18%) and respect the cap.
+function bumpGas(prev, factor, cap) {
+  const f = (x) => BigInt(Math.ceil(Number(x) * factor));
+  let maxFee = min(f(prev.maxFeePerGas), cap);
+  let priority = min(f(prev.maxPriorityFeePerGas), maxFee);
+  if (priority <= 0n) priority = 1n;
+  return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority };
 }
 
 function defaultGasLimit(qty) {
@@ -210,12 +312,27 @@ async function main() {
   const sea = new ethers.Contract(seadropAddress, SEADROP_ABI, provider);
   const nft = new ethers.Contract(nftContract, NFT_ABI, provider);
 
+  // Fan-out broadcast providers (primary + any extras).
+  const bcProviders = makeBroadcastProviders(RPC_URL);
+
   const walletIndices = parseList(args.wallets, keys.map((_, i) => i));
   const wallets = walletIndices.map(i => {
     if (!keys[i]) throw new Error(`Wallet index ${i} tidak ada di WALLET_PRIVATE_KEYS`);
     const wallet = new ethers.Wallet(keys[i], provider);
     return { index: i, wallet, address: wallet.address };
   });
+
+  // Clock calibration (best-effort, ~±0.5s due to 1s Date header granularity).
+  let clockOffsetMs = 0;
+  if (args['clock-offset-ms'] !== undefined) {
+    clockOffsetMs = Number(args['clock-offset-ms']) || 0;
+    console.log(`🕰️ Clock offset (manual): ${clockOffsetMs} ms`);
+  } else if (!asBool(args['no-clock-sync'])) {
+    const cal = await calibrateClock(RPC_URL);
+    clockOffsetMs = cal.ok ? cal.offsetMs : 0;
+    console.log(`🕰️ Clock offset: ${clockOffsetMs} ms (${cal.ok ? cal.samples + ' samples' : 'calibration failed, using 0'})`);
+  }
+  const realNow = () => Date.now() + clockOffsetMs;
 
   let [name, symbol, drop, feeRecipients, feeData, block, totalSupply, maxSupply] = await Promise.all([
     retry(() => nft.name(), 'nft.name').catch(() => 'NFT'),
@@ -246,6 +363,10 @@ async function main() {
 
   const earlyMs = Number(args['early-ms'] ?? process.env.FAST_MINT_EARLY_MS ?? 750);
   const pollMs = Number(args['poll-ms'] ?? process.env.FAST_MINT_POLL_MS ?? 250);
+  const presignLeadMs = Number(args['presign-lead-ms'] ?? process.env.FAST_MINT_PRESIGN_LEAD_MS ?? 1500);
+  const rbfAfterMs = Number(args['rbf-after-ms'] ?? process.env.FAST_MINT_RBF_AFTER_MS ?? 13000);
+  const rbfMax = Number(args['rbf-max'] ?? process.env.FAST_MINT_RBF_MAX ?? 4);
+  const rbfBump = Number(args['rbf-bump'] ?? process.env.FAST_MINT_RBF_BUMP ?? 1.18);
   const qtyArg = String(args.qty ?? args.quantity ?? '1').toLowerCase();
   const stageName = args.stage || name;
   let latestDrop = drop;
@@ -258,15 +379,18 @@ async function main() {
   });
 
   console.log('\n' + line());
-  console.log(`🚀 FAST AUTO-MINT — ${name} (${symbol})`);
+  console.log(`🚀 FAST AUTO-MINT (v2 low-latency) — ${name} (${symbol})`);
   console.log(line());
-  console.log(`🕘 Sekarang       : ${wib()}`);
+  console.log(`🕘 Sekarang       : ${wib(realNow())}`);
   console.log(`🎯 Target start   : ${wib(targetMs)} (${new Date(targetMs).toISOString()})`);
   console.log(`📤 Broadcast      : ${wib(targetMs - earlyMs)} (early ${earlyMs}ms)`);
+  console.log(`✍️  Pre-sign       : ${wib(targetMs - earlyMs - presignLeadMs)} (lead ${presignLeadMs}ms)`);
   if (onchainEndMs) console.log(`🏁 End            : ${wib(onchainEndMs)}`);
   console.log(`🔗 Chain          : ${chainId}`);
   console.log(`🎨 NFT            : ${nftContract}`);
   console.log(`🌊 SeaDrop        : ${seadropAddress}`);
+  console.log(`📡 Broadcast RPCs : ${bcProviders.length} endpoint(s)`);
+  console.log(`🔁 RBF            : after ${rbfAfterMs}ms, max ${rbfMax}x, bump ${Math.round((rbfBump - 1) * 100)}%`);
   console.log(`💸 Live price     : ${ethers.formatEther(drop.mintPrice)} ETH`);
   console.log(`🎒 Max/wallet     : ${Number(drop.maxTotalMintableByWallet)}`);
   console.log(`📊 Supply         : ${totalSupply.toString()} / ${maxSupply.toString() || '?'}`);
@@ -333,102 +457,142 @@ async function main() {
   })();
 
   const broadcastMs = targetMs - earlyMs;
-  if (nowMs() < broadcastMs) {
-    const wait = broadcastMs - nowMs();
-    console.log(`\n⏳ Pre-warmed. Menunggu broadcast: ${Math.floor(wait / 60000)}m ${Math.floor((wait % 60000) / 1000)}s...`);
+  const presignMs = broadcastMs - presignLeadMs;
+
+  // 1) Wait until pre-sign window (using calibrated clock).
+  if (realNow() < presignMs) {
+    const wait = presignMs - realNow();
+    console.log(`\n⏳ Pre-warmed. Pre-sign dalam: ${Math.floor(wait / 60000)}m ${Math.floor((wait % 60000) / 1000)}s...`);
     await sleep(wait);
-  } else {
-    console.log('\n🟢 Broadcast time sudah lewat/aktif — broadcast sekarang.');
   }
 
-  // Use latest cached drop/gas. If creator changed price/max shortly before mint, this picks it up.
+  // 2) PRE-SIGN attempt #1 in parallel using the latest cached drop/gas.
+  //    Only network broadcast remains for T0 — signing (local CPU) is done up front.
   const liveMaxPerWallet = Number(latestDrop.maxTotalMintableByWallet) || Number(drop.maxTotalMintableByWallet) || 1;
   const livePrice = BigInt(latestDrop.mintPrice);
   const liveGas = gasParamsFrom(latestBlock?.baseFeePerGas, latestFeeData, {
     gasMode: args['gas-mode'], maxFeeGwei: args['max-fee-gwei'], priorityGwei: args['priority-gwei'],
   });
 
+  const signed = await Promise.all(executable.map(async (p) => {
+    const qty = Math.min(p.qty, liveMaxPerWallet - p.minted);
+    if (qty <= 0) return { ...p, skipped: true, error: 'qty=0 after live max update' };
+    const value = livePrice * BigInt(qty);
+    const upfront = value + p.gasLimit * liveGas.maxFeePerGas;
+    if (p.balance < upfront) return { ...p, qty, skipped: true, error: `ETH kurang after live update; need ${eth(upfront)} ETH, punya ${eth(p.balance)} ETH` };
+    const data = iface.encodeFunctionData('mintPublic', [nftContract, feeRecipient, ethers.ZeroAddress, qty]);
+    const gasState = { maxFeePerGas: liveGas.maxFeePerGas, maxPriorityFeePerGas: liveGas.maxPriorityFeePerGas };
+    const rawTxReq = {
+      type: 2, chainId, to: seadropAddress, nonce: p.nonce, data, value,
+      gasLimit: p.gasLimit, maxFeePerGas: gasState.maxFeePerGas, maxPriorityFeePerGas: gasState.maxPriorityFeePerGas,
+    };
+    const raw = await p.wallet.signTransaction(rawTxReq);
+    const expectedHash = ethers.keccak256(raw);
+    return { ...p, qty, value, gasState, rawTxReq, raw, expectedHash };
+  }));
+
+  const ready = signed.filter(s => s.raw);
+  console.log(`\n✍️  Pre-signed ${ready.length} tx in parallel @ ${wib(realNow())}`);
+
+  // 3) Wait the final stretch to the exact broadcast moment.
+  if (realNow() < broadcastMs) {
+    const wait = broadcastMs - realNow();
+    await sleep(wait);
+  } else {
+    console.log('🟢 Broadcast time sudah lewat/aktif — broadcast sekarang.');
+  }
+
   console.log('\n' + line());
-  console.log(`📨 BROADCAST RAW TX — ${wib()}`);
+  console.log(`📨 BROADCAST RAW TX (fan-out ${bcProviders.length} RPC) — ${wib(realNow())}`);
   console.log(line());
   console.log(`💸 Final price    : ${ethers.formatEther(livePrice)} ETH`);
   console.log(`🎒 Final max/wal. : ${liveMaxPerWallet}`);
   console.log(`📊 Latest supply  : ${latestTotalSupply.toString()} / ${maxSupply.toString() || '?'}`);
   console.log(`⛽ Final gas      : maxFee ${gwei(liveGas.maxFeePerGas)} gwei | prio ${gwei(liveGas.maxPriorityFeePerGas)} gwei`);
 
-  const txs = [];
-  for (const p of executable) {
-    const qty = Math.min(p.qty, liveMaxPerWallet - p.minted);
-    if (qty <= 0) {
-      txs.push({ ...p, success: false, skipped: true, error: 'qty=0 after live max update' });
-      continue;
-    }
-    const value = livePrice * BigInt(qty);
-    const upfront = value + p.gasLimit * liveGas.maxFeePerGas;
-    if (p.balance < upfront) {
-      txs.push({ ...p, qty, success: false, skipped: true, error: `ETH kurang after live update; need ${eth(upfront)} ETH, punya ${eth(p.balance)} ETH` });
-      continue;
-    }
-    const data = iface.encodeFunctionData('mintPublic', [nftContract, feeRecipient, ethers.ZeroAddress, qty]);
-    const rawTxReq = {
-      type: 2,
-      chainId,
-      to: seadropAddress,
-      nonce: p.nonce,
-      data,
-      value,
-      gasLimit: p.gasLimit,
-      maxFeePerGas: liveGas.maxFeePerGas,
-      maxPriorityFeePerGas: liveGas.maxPriorityFeePerGas,
-    };
-    const raw = await p.wallet.signTransaction(rawTxReq);
-    txs.push({ ...p, qty, value, rawTxReq, raw });
-    console.log(`🚀 Wallet ${p.index} ${shortAddr(p.address)}: qty ${qty} | nonce ${p.nonce} | gasLimit ${p.gasLimit} | value ${eth(value)} ETH`);
-  }
+  // 4) Per-wallet submit + RBF auto-rebroadcast. All wallets run concurrently.
+  const submitWithRbf = async (s) => {
+    if (!s.raw) return { ...s, success: false, error: s.error || 'not signed' };
+    let raw = s.raw;
+    let expectedHash = s.expectedHash;
+    let gasState = s.gasState;
+    let lastHash = null;
+    const deadline = realNow() + rbfAfterMs * (rbfMax + 1) + 5000;
 
-  const sent = await Promise.all(txs.map(async (t) => {
-    if (t.skipped || !t.raw) return t;
-    try {
-      const resp = await provider.broadcastTransaction(t.raw);
-      console.log(`📨 Wallet ${t.index}: ${resp.hash}`);
-      return { ...t, txHash: resp.hash, response: resp };
-    } catch (e) {
-      const err = decodeErr(e);
-      console.log(`❌ Wallet ${t.index}: broadcast gagal — ${err}`);
-      return { ...t, success: false, error: err };
-    }
-  }));
-
-  const results = await Promise.all(sent.map(async (s) => {
-    if (!s.txHash) return s;
-    try {
-      const receipt = await provider.waitForTransaction(s.txHash, 1, Number(args['receipt-timeout-ms'] || 120000));
-      const tokenIds = [];
-      if (receipt?.logs) {
-        for (const l of receipt.logs) {
-          if (l.address.toLowerCase() !== nftContract.toLowerCase()) continue;
-          try {
-            const parsed = nftIface.parseLog({ topics: l.topics, data: l.data });
-            if (parsed?.name === 'Transfer') tokenIds.push(parsed.args.tokenId.toString());
-          } catch {}
-        }
+    for (let attempt = 0; attempt <= rbfMax; attempt++) {
+      // Broadcast (fan-out). First RPC to accept wins.
+      const b = await broadcastFanout(bcProviders, raw, expectedHash, `w${s.index}`);
+      if (b.ok && b.hash) {
+        lastHash = b.hash;
+        const tag = attempt === 0 ? 'TX' : `RBF#${attempt}`;
+        console.log(`📨 Wallet ${s.index} ${tag}: ${b.hash}${b.benign ? ' (already in flight)' : ''} via ${shortAddr(b.url || '')}`);
+      } else {
+        console.log(`❌ Wallet ${s.index}: broadcast gagal — ${b.msg || 'unknown'}`);
+        if (!lastHash) return { ...s, success: false, error: b.msg || 'broadcast failed' };
       }
-      return { ...s, success: receipt?.status === 1, receipt, tokenIds, error: receipt?.status === 1 ? null : 'transaction reverted' };
-    } catch (e) {
-      return { ...s, success: false, error: decodeErr(e) };
+
+      // Wait for inclusion up to rbfAfterMs; if mined, done.
+      try {
+        const receipt = await provider.waitForTransaction(lastHash, 1, rbfAfterMs);
+        if (receipt) {
+          const tokenIds = [];
+          for (const l of (receipt.logs || [])) {
+            if (l.address.toLowerCase() !== nftContract.toLowerCase()) continue;
+            try {
+              const parsed = nftIface.parseLog({ topics: l.topics, data: l.data });
+              if (parsed?.name === 'Transfer') tokenIds.push(parsed.args.tokenId.toString());
+            } catch {}
+          }
+          return { ...s, txHash: lastHash, success: receipt.status === 1, receipt, tokenIds, attempts: attempt + 1,
+            error: receipt.status === 1 ? null : 'transaction reverted' };
+        }
+      } catch { /* timeout → fall through to RBF */ }
+
+      if (attempt >= rbfMax || realNow() > deadline) break;
+
+      // RBF: bump gas on the SAME nonce and re-sign for the next attempt.
+      gasState = bumpGas(gasState, rbfBump, liveGas.cap);
+      const rbfReq = { ...s.rawTxReq, maxFeePerGas: gasState.maxFeePerGas, maxPriorityFeePerGas: gasState.maxPriorityFeePerGas };
+      raw = await s.wallet.signTransaction(rbfReq);
+      expectedHash = ethers.keccak256(raw);
+      console.log(`🔁 Wallet ${s.index} RBF bump → maxFee ${gwei(gasState.maxFeePerGas)} gwei | prio ${gwei(gasState.maxPriorityFeePerGas)} gwei`);
     }
-  }));
+
+    // Final check: maybe it mined right at the edge.
+    if (lastHash) {
+      try {
+        const receipt = await provider.getTransactionReceipt(lastHash);
+        if (receipt) {
+          const tokenIds = [];
+          for (const l of (receipt.logs || [])) {
+            if (l.address.toLowerCase() !== nftContract.toLowerCase()) continue;
+            try {
+              const parsed = nftIface.parseLog({ topics: l.topics, data: l.data });
+              if (parsed?.name === 'Transfer') tokenIds.push(parsed.args.tokenId.toString());
+            } catch {}
+          }
+          return { ...s, txHash: lastHash, success: receipt.status === 1, receipt, tokenIds, error: receipt.status === 1 ? null : 'transaction reverted' };
+        }
+      } catch {}
+    }
+    return { ...s, txHash: lastHash, success: false, error: 'tidak ter-mine setelah RBF (mungkat sold out / nonce dipakai tx lain)' };
+  };
+
+  const skippedSigned = signed.filter(s => !s.raw);
+  for (const p of skippedSigned) console.log(`⏭️  Wallet ${p.index}: skip — ${p.error}`);
+
+  const results = await Promise.all(ready.map(submitWithRbf));
   polling = false;
   await Promise.race([poller, sleep(pollMs + 100)]).catch(() => {});
 
   console.log('\n' + line());
-  console.log(`📋 HASIL FAST AUTO-MINT — ${wib()}`);
+  console.log(`📋 HASIL FAST AUTO-MINT — ${wib(realNow())}`);
   console.log(line());
   const ok = results.filter(r => r.success);
   const fail = results.filter(r => !r.success);
   console.log(`✅ Berhasil : ${ok.length} wallet`);
   console.log(`❌ Gagal    : ${fail.length} wallet\n`);
-  for (const r of results) {
+  for (const r of [...results, ...skippedSigned]) {
     if (r.success) {
       console.log(`✅ Wallet ${r.index} ${shortAddr(r.address)}`);
       console.log(`   Qty       : ${r.qty}`);
@@ -436,6 +600,7 @@ async function main() {
       console.log(`   Etherscan : https://etherscan.io/tx/${r.txHash}`);
       console.log(`   Block     : ${r.receipt.blockNumber}`);
       console.log(`   Gas used  : ${r.receipt.gasUsed.toString()}`);
+      if (r.attempts) console.log(`   Attempts  : ${r.attempts} (incl. RBF)`);
       if (r.tokenIds?.length) console.log(`   Token IDs : ${r.tokenIds.join(', ')}`);
     } else {
       console.log(`❌ Wallet ${r.index} ${shortAddr(r.address)}`);
