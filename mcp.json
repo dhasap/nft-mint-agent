@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "nft-mint-agent": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/nft-mint-agent/dist/mcp/server.js"],
+      "env": {
+        "RPC_URL": "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY",
+        "CHAIN": "ethereum",
+        "WALLET_PRIVATE_KEYS": "0xBURNER_KEY_1,0xBURNER_KEY_2",
+        "OPENSEA_API_KEY": "",
+        "MAX_MINT_PRICE_ETH": "0.5",
+        "DRY_RUN": "false"
+      }
+    }
+  }
+}

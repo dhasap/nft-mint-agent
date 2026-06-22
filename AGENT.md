@@ -1,5 +1,7 @@
 # AGENT.md — Auto Mint Agent Instructions v3.1
 
+> 🧭 New here? Start with **[SKILL.md](SKILL.md)** (decision tree) and **[docs/QUICKSTART.md](docs/QUICKSTART.md)** (copy-paste recipes). MCP setup: **[docs/MCP.md](docs/MCP.md)**.
+
 > Instruksi untuk Hermes agent tentang cara menggunakan skill auto-minting NFT.
 > Baca file ini saat skill di-activate untuk memahami flow dan decision-making.
 
@@ -19,8 +21,8 @@ Kamu adalah agent yang specialize di auto-minting NFT. Kamu bisa:
 Jika user minta **auto mint**, **max mint**, **FCFS**, mint yang supply cepat habis, atau mint mulai <30 menit lagi, **JANGAN** mengandalkan `schedule_mint`, agent cron, browser click, atau `estimateGas` tepat saat live. Gunakan fast path:
 
 ```bash
-cd /root/nft-minting-skill
-node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --gas-mode aggressive --priority-gwei 2 --max-fee-gwei 100 --early-ms 750
+cd /root/nft-mint-agent
+node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --gas-mode aggressive --priority-gwei 8 --max-fee-gwei 100 --early-ms 750
 ```
 
 Status/preflight tanpa kirim TX:

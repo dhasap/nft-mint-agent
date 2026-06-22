@@ -1,5 +1,7 @@
 # Auto Mint Agent — Claude Code Instructions
 
+> 🧭 New here? Start with **[SKILL.md](SKILL.md)** (decision tree) and **[docs/QUICKSTART.md](docs/QUICKSTART.md)** (copy-paste recipes). MCP setup: **[docs/MCP.md](docs/MCP.md)**.
+
 ## Overview
 This skill provides 16 tools for automated NFT minting with multi-wallet support.
 All tools are accessible via `node runner.mjs <tool_name> '<json_params>'` from the project directory.
@@ -10,8 +12,8 @@ All tools are accessible via `node runner.mjs <tool_name> '<json_params>'` from 
 Jika user minta **auto mint**, **max mint**, **FCFS**, mint yang supply cepat habis, atau mint mulai <30 menit lagi, **JANGAN** mengandalkan `schedule_mint`, agent cron, browser click, atau `estimateGas` tepat saat live. Gunakan fast path:
 
 ```bash
-cd /root/nft-minting-skill
-node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --gas-mode aggressive --priority-gwei 2 --max-fee-gwei 100 --early-ms 750
+cd /root/nft-mint-agent
+node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" --time auto --qty max --wallets 0,1 --gas-mode aggressive --priority-gwei 8 --max-fee-gwei 100 --early-ms 750
 ```
 
 Status/preflight tanpa kirim TX:
@@ -33,7 +35,7 @@ Gunakan `mint_nft`/`schedule_mint` hanya untuk mint santai atau tidak kompetitif
 
 ## Setup
 ```bash
-cd /root/nft-minting-skill
+cd /root/nft-mint-agent
 npm install
 cp .env.example .env  # Edit with your values
 npm run build

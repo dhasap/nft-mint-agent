@@ -1,5 +1,24 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+*.tsbuildinfo
+
+# Secrets / env
 .env
-*.log
+.env.*
+!.env.example
+
+# Wallet/keys (never commit)
+*.key
+keys.txt
 wallets.json
+
+# Scheduler state
+data/*
+!data/.gitkeep
+
+# Logs & OS
+*.log
+.DS_Store

@@ -1,55 +1,63 @@
 {
-  "name": "nft-minting-skill",
-  "version": "3.2.0",
-  "description": "Multi-wallet NFT minting toolkit with OpenSea/SeaDrop support, competitive fast-mint raw transaction path, scheduled drops, browser fallback, and listing helpers.",
+  "name": "nft-mint-agent",
+  "version": "3.3.0",
+  "description": "Competitive multi-wallet NFT auto-minting agent for OpenSea/SeaDrop and direct contracts. Low-latency fast-mint (raw EIP-1559, multi-RPC fan-out, RBF), scheduled drops, browser fallback, and listing. Runs as an MCP server, a Hermes/Claude agent skill, or a standalone CLI.",
   "keywords": [
     "nft",
     "minting",
+    "nft-mint",
+    "nft-bot",
+    "mint-bot",
+    "auto-minting",
     "ethereum",
     "web3",
+    "evm",
     "opensea",
+    "opensea-bot",
     "seaport",
+    "seadrop",
+    "fast-mint",
     "multi-wallet",
-    "automated-minting",
-    "nft-bot",
+    "scheduled-mint",
+    "browser-minting",
     "erc721",
     "erc1155",
-    "evm",
-    "nft-mint",
-    "mint-bot",
-    "opensea-listing",
-    "hermes-agent",
+    "ethers",
+    "mcp",
+    "model-context-protocol",
     "ai-agent",
-    "browser-minting",
-    "scheduled-mint",
-    "fast-mint",
-    "seadrop",
-    "opensea-api",
+    "hermes-agent",
+    "claude",
     "gas-optimization",
     "multi-chain",
     "defi",
     "blockchain",
-    "typescript",
-    "ethers.js"
+    "typescript"
   ],
   "author": "dhasap",
   "license": "MIT",
+  "type": "commonjs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dhasap/nft-minting-skill.git"
+    "url": "https://github.com/dhasap/nft-mint-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/dhasap/nft-minting-skill/issues"
+    "url": "https://github.com/dhasap/nft-mint-agent/issues"
   },
-  "homepage": "https://github.com/dhasap/nft-minting-skill#readme",
+  "homepage": "https://github.com/dhasap/nft-mint-agent#readme",
   "main": "dist/index.js",
+  "bin": {
+    "nft-mint-mcp": "mcp-server.mjs"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "mcp": "node mcp-server.mjs",
     "dev": "ts-node src/index.ts",
     "generate-wallets": "ts-node src/wallet/generate.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "ethers": "^6.13.0",
     "dotenv": "^16.4.5",
     "axios": "^1.7.0"

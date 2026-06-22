@@ -1,0 +1,31 @@
+name: 🐛 Bug Report
+description: Report a problem with minting, listing, or the agent tools
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the command/tool you ran and the full output (redact keys!).
+    validations:
+      required: true
+  - type: input
+    id: chain
+    attributes:
+      label: Chain
+      placeholder: ethereum / base / polygon ...
+  - type: input
+    id: contract
+    attributes:
+      label: Contract / collection
+      placeholder: 0x... or opensea.io/collection/...
+  - type: dropdown
+    id: path
+    attributes:
+      label: Which path?
+      options: [fast-mint.mjs, mint_nft, schedule_mint, browser_mint, listing, MCP server, other]
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: 3.3.0
