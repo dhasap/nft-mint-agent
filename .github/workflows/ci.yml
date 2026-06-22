@@ -26,8 +26,15 @@ jobs:
         run: |
           node --check runner.mjs
           node --check fast-mint.mjs
+          node --check mcp-server.mjs
           node --check plop-auto-mint.mjs
-      - name: Secret scan (no raw private keys committed)
+      - name: Secret scan (no private keys / mnemonics committed)
         run: |
-          if git grep -nE "0x[a-fA-F0-9]{64}" -- . ':!*.lock' ':!package-lock.json'; then
-            echo "::error::Possible private key committed"; exit 1; fi
+          # Flag 64-hex values assigned to key/secret/mnemonic identifiers
+          # (real leaks), not arbitrary 64-hex constants like zoneHash/conduitKey.
+          if git grep -nEi "(private_?key|priv_?key|mnemonic|secret_?key|seed_?phrase)['\"[:space:]]*[:=]['\"[:space:]]*0x[a-fA-F0-9]{64}" -- . ':!*.lock' ':!package-lock.json' ':!.env.example'; then
+            echo "::error::Possible private key/mnemonic committed"; exit 1; fi
+          # Flag a non-empty WALLET_PRIVATE_KEYS in any env file (except the template)
+          if git grep -nE "WALLET_PRIVATE_KEYS=0x[a-fA-F0-9]{64}" -- . ':!.env.example'; then
+            echo "::error::Wallet private key committed in an env file"; exit 1; fi
+          echo "Secret scan clean ✅"
