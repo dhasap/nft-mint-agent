@@ -14,7 +14,7 @@ Low-latency fast-mint, scheduled drops, browser fallback, and listing — usable
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org/)
 [![Ethers](https://img.shields.io/badge/ethers.js-v6-purple.svg)](https://docs.ethers.org/v6/)
 [![MCP](https://img.shields.io/badge/MCP-server-orange.svg)](docs/MCP.md)
-[![Node](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
 
 </div>
 

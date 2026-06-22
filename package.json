@@ -36,6 +36,9 @@
   ],
   "author": "dhasap",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "type": "commonjs",
   "repository": {
     "type": "git",
