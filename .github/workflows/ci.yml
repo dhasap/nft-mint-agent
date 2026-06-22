@@ -22,19 +22,33 @@ jobs:
       - run: npm ci
       - name: Type-check & build
         run: npm run build
+      - name: Unit tests
+        run: npm test
       - name: Syntax-check CLI runners
         run: |
           node --check runner.mjs
           node --check fast-mint.mjs
           node --check mcp-server.mjs
           node --check plop-auto-mint.mjs
-      - name: Secret scan (no private keys / mnemonics committed)
+      - name: Dependency audit (high+; non-blocking)
+        run: npm audit --omit=dev --audit-level=high || true
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Targeted private-key / mnemonic scan
         run: |
           # Flag 64-hex values assigned to key/secret/mnemonic identifiers
           # (real leaks), not arbitrary 64-hex constants like zoneHash/conduitKey.
           if git grep -nEi "(private_?key|priv_?key|mnemonic|secret_?key|seed_?phrase)['\"[:space:]]*[:=]['\"[:space:]]*0x[a-fA-F0-9]{64}" -- . ':!*.lock' ':!package-lock.json' ':!.env.example'; then
             echo "::error::Possible private key/mnemonic committed"; exit 1; fi
-          # Flag a non-empty WALLET_PRIVATE_KEYS in any env file (except the template)
           if git grep -nE "WALLET_PRIVATE_KEYS=0x[a-fA-F0-9]{64}" -- . ':!.env.example'; then
             echo "::error::Wallet private key committed in an env file"; exit 1; fi
-          echo "Secret scan clean ✅"
+          echo "Targeted scan clean ✅"
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

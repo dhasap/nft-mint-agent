@@ -6,17 +6,17 @@ import { SKILL_DEFINITION, TOOLS } from './tools';
  * Skill ini menyediakan tools untuk auto-minting NFT
  * yang bisa dipanggil oleh Hermes agent.
  *
- * v2.1: Added browser-based minting (scrape_contract_from_website + browser_mint)
+ * v3.3: MCP server + validated CLI + low-latency fast-mint (multi-RPC fan-out, RBF, clock sync)
  *
  * Usage from Hermes agent:
- *   const mintSkill = require('auto-mint-agent');
+ *   const mintSkill = require('nft-mint-agent');
  *   const result = await mintSkill.TOOLS.parse_mint_link({ url: '...' });
  */
 
 async function main() {
   console.log('╔══════════════════════════════════════════════════════╗');
-  console.log('║   🤖 Auto Mint Agent - Hermes Skill v2.1            ║');
-  console.log('║   Multi-Wallet + Browser Minting + Interactive List ║');
+  console.log('║   🤖 nft-mint-agent v3.3 — Auto Mint Agent          ║');
+  console.log('║   Multi-Wallet · fast-mint · MCP · Listing          ║');
   console.log('╚══════════════════════════════════════════════════════╝\n');
 
   console.log('Available Tools:');

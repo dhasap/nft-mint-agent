@@ -54,13 +54,15 @@
     "start": "node dist/index.js",
     "mcp": "node mcp-server.mjs",
     "dev": "ts-node src/index.ts",
+    "test": "vitest run",
     "generate-wallets": "ts-node src/wallet/generate.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "ethers": "^6.13.0",
     "dotenv": "^16.4.5",
-    "axios": "^1.7.0"
+    "axios": "^1.7.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

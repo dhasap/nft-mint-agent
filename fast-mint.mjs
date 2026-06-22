@@ -38,6 +38,7 @@ import { dirname, join } from 'path';
 import http from 'node:http';
 import https from 'node:https';
 import { URL } from 'node:url';
+import { gasParamsFrom, bumpGas, defaultGasLimit as libDefaultGasLimit, shouldFireOnBlock } from './lib/fastmint-gas.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '.env') });
@@ -312,42 +313,64 @@ async function resolveSeaDrop(provider, chainId, nftContract) {
   throw new Error(`SeaDrop address tidak ditemukan/valid untuk chain ${chainId}`);
 }
 
-function gasParamsFrom(baseFee, feeData, opts) {
-  const capGwei = opts.maxFeeGwei || process.env.MAX_GAS_PRICE_GWEI || '100';
-  // Mode-scaled, higher default priority. Hot drops need a competitive tip to be
-  // ordered near the front of the block — 2 gwei is far too low for FCFS mints.
-  const mode = String(opts.gasMode || process.env.GAS_MODE || 'aggressive').toLowerCase();
-  const defaultPriorityByMode = { eco: '1', normal: '2', aggressive: '5', custom: process.env.CUSTOM_PRIORITY_GWEI || '5' };
-  const priorityGwei = opts.priorityGwei || process.env.PRIORITY_FEE_GWEI || defaultPriorityByMode[mode] || '5';
-  const cap = ethers.parseUnits(String(capGwei), 'gwei');
-  const priorityBase = ethers.parseUnits(String(priorityGwei), 'gwei');
-  const mult = mode === 'eco' ? 1.25 : mode === 'normal' ? 2 : mode === 'custom'
-    ? Number(process.env.CUSTOM_GAS_MULTIPLIER || '3') : 4;
-  const rawBase = baseFee || feeData.gasPrice || ethers.parseUnits('20', 'gwei');
-  let priority = feeData.maxPriorityFeePerGas || priorityBase;
-  if (priority < priorityBase) priority = priorityBase;
-  let maxFee = BigInt(Math.ceil(Number(rawBase) * mult)) + priority;
-  maxFee = min(maxFee, cap);
-  priority = min(priority, maxFee > rawBase ? maxFee - rawBase : maxFee);
-  if (priority <= 0n) priority = 1n;
-  return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority, mode, cap };
-}
-
-// Bump gas for replace-by-fee. EIP-1559 nodes require BOTH maxFee and priority to
-// rise by >=10%; we use the requested factor (default +18%) and respect the cap.
-function bumpGas(prev, factor, cap) {
-  const f = (x) => BigInt(Math.ceil(Number(x) * factor));
-  let maxFee = min(f(prev.maxFeePerGas), cap);
-  let priority = min(f(prev.maxPriorityFeePerGas), maxFee);
-  if (priority <= 0n) priority = 1n;
-  return { maxFeePerGas: maxFee, maxPriorityFeePerGas: priority };
-}
+// gasParamsFrom + bumpGas now live in ./lib/fastmint-gas.mjs (pure + unit-tested).
 
 function defaultGasLimit(qty) {
   // Intentionally conservative. Unused gas is refunded, but the wallet must afford upfront maxFee * gasLimit.
   const base = BigInt(args['gas-limit'] || process.env.FAST_MINT_GAS_LIMIT || '650000');
-  const scaled = 280000n + BigInt(qty) * 60000n;
-  return max(base, scaled);
+  return libDefaultGasLimit(qty, base);
+}
+
+// Build a WebSocketProvider, using the global WebSocket if present (Node 22+),
+// else the optional `ws` package. Returns null if neither is available.
+async function makeWsProvider(url) {
+  try {
+    if (typeof WebSocket !== 'undefined') return new ethers.WebSocketProvider(url);
+  } catch {}
+  try {
+    const { default: WS } = await import('ws');
+    return new ethers.WebSocketProvider(() => new WS(url));
+  } catch {
+    return null;
+  }
+}
+
+// Resolve when it's time to broadcast. Races the calibrated timer against an
+// optional WS newHeads watcher that fires once a block timestamp >= startSec.
+// Always falls back to the timer if WS is unavailable or errors.
+async function waitForBroadcast({ broadcastMs, realNow, startSec, wsUrl, useWs, log }) {
+  const timer = (async () => {
+    const wait = broadcastMs - realNow();
+    if (wait > 0) await sleep(wait);
+    return 'timer';
+  })();
+
+  if (!useWs || !wsUrl) {
+    await timer;
+    return 'timer';
+  }
+
+  let wsProvider = null;
+  const wsRace = new Promise((resolve) => {
+    makeWsProvider(wsUrl).then((wp) => {
+      if (!wp) { log('⚠️ WS unavailable (install `ws` or use Node 22+) — using timer.'); return; }
+      wsProvider = wp;
+      log('🔌 WS newHeads watch armed — will fire when drop goes active on-chain.');
+      wp.on('block', async (bn) => {
+        try {
+          const blk = await wp.getBlock(bn);
+          if (blk && shouldFireOnBlock(blk.timestamp, startSec)) {
+            log(`🟢 WS: block ${bn} ts ${blk.timestamp} >= start ${startSec} — drop ACTIVE.`);
+            resolve('ws-active');
+          }
+        } catch {}
+      });
+    }).catch(() => {});
+  });
+
+  const who = await Promise.race([timer, wsRace]);
+  try { if (wsProvider) await wsProvider.destroy(); } catch {}
+  return who;
 }
 
 async function main() {
@@ -550,28 +573,32 @@ async function main() {
   const ready = signed.filter(s => s.raw);
   console.log(`\n✍️  Pre-signed ${ready.length} tx in parallel @ ${wib(realNow())}`);
 
-  // 3) Wait the final stretch, PRE-WARM sockets ~300ms before T0, then fire.
-  //    Warming opens DNS+TCP+TLS early so the broadcast only pays one round-trip.
-  const PREWARM_LEAD = 300;
-  if (realNow() < broadcastMs) {
-    const wait = broadcastMs - realNow();
-    if (wait > PREWARM_LEAD + 50) {
-      await sleep(wait - PREWARM_LEAD);
-      await prewarmSockets(bcEndpoints);
-      const rem = broadcastMs - realNow();
-      if (rem > 0) await sleep(rem);
-    } else {
-      await prewarmSockets(bcEndpoints);
-      const rem = broadcastMs - realNow();
-      if (rem > 0) await sleep(rem);
+  // 3) Keep broadcast sockets warm during the wait (periodic eth_chainId every
+  //    ~20s so DNS+TCP+TLS stay established), then fire the instant the trigger
+  //    resolves — no fresh handshake on the hot path.
+  let warming = true;
+  const warmer = (async () => {
+    while (warming) {
+      await prewarmSockets(bcEndpoints).catch(() => {});
+      await sleep(20000);
     }
-  } else {
-    console.log('🟢 Broadcast time sudah lewat/aktif — pre-warm & broadcast sekarang.');
-    await prewarmSockets(bcEndpoints);
-  }
+  })();
+
+  // Trigger: either the calibrated timer OR (opt-in) a WebSocket newHeads watcher
+  // that fires the moment the chain reports the drop is active — avoids both
+  // `NotActive` reverts (too early) and lateness (too slow). Enable with --ws-active
+  // (requires RPC_WS_URL). Default stays the proven timer path.
+  const startSec = Number(latestDrop.startTime) || Number(drop.startTime) || Math.floor(targetMs / 1000);
+  const fireReason = await waitForBroadcast({
+    broadcastMs, realNow, startSec,
+    wsUrl: process.env.RPC_WS_URL,
+    useWs: asBool(args['ws-active']),
+    log: (m) => console.log(m),
+  });
+  warming = false;
 
   console.log('\n' + line());
-  console.log(`📨 BROADCAST RAW TX (fan-out ${bcEndpoints.length} RPC, sockets warmed) — ${wib(realNow())}`);
+  console.log(`📨 BROADCAST RAW TX (${fireReason}, fan-out ${bcEndpoints.length} RPC, sockets warmed) — ${wib(realNow())}`);
   console.log(line());
   console.log(`💸 Final price    : ${ethers.formatEther(livePrice)} ETH`);
   console.log(`🎒 Final max/wal. : ${liveMaxPerWallet}`);
