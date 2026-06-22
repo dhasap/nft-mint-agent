@@ -35,6 +35,9 @@ import { ethers } from 'ethers';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import http from 'node:http';
+import https from 'node:https';
+import { URL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '.env') });
@@ -186,27 +189,78 @@ async function calibrateClock(rpcUrl, samples = 6) {
   return { offsetMs: Math.round(median), samples: offsets.length, ok: true };
 }
 
-// ── Multi-RPC broadcast fan-out ──────────────────────────────────────────────
-function makeBroadcastProviders(primaryUrl) {
+// ── Multi-RPC broadcast fan-out (raw eth_sendRawTransaction + keep-alive) ─────
+// Direct node:http(s) JSON-RPC with persistent keep-alive sockets. This skips the
+// ethers provider overhead on the hot path and lets us PRE-WARM the TCP/TLS
+// connection so the broadcast at T0 only pays one round-trip, not a handshake.
+function makeBroadcastEndpoints(primaryUrl) {
   const extra = parseStrList(args['broadcast-rpcs'] ?? process.env.BROADCAST_RPC_URLS, []);
   const urls = [primaryUrl, ...extra].filter((u, i, arr) => u && arr.indexOf(u) === i);
-  return urls.map(u => ({ url: u, provider: new ethers.JsonRpcProvider(u, undefined, { batchMaxCount: 1 }) }));
+  return urls.map(u => {
+    const isHttps = u.startsWith('https');
+    const AgentCls = isHttps ? https.Agent : http.Agent;
+    // keepAlive reuses the socket; maxSockets>1 allows concurrent wallets per RPC.
+    const agent = new AgentCls({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 16 });
+    return { url: u, agent };
+  });
+}
+
+// Low-overhead JSON-RPC POST over a persistent socket.
+function rpcPost(endpoint, method, params, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(endpoint.url); } catch (e) { return reject(e); }
+    const lib = u.protocol === 'https:' ? https : http;
+    const payload = JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params });
+    const req = lib.request({
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: (u.pathname || '/') + (u.search || ''),
+      method: 'POST',
+      agent: endpoint.agent,
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          if (j.error) {
+            const err = new Error(j.error.message || JSON.stringify(j.error));
+            err.data = j.error.data;
+            reject(err);
+          } else resolve(j.result);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('rpc timeout')));
+    req.write(payload);
+    req.end();
+  });
+}
+
+// Open & warm every socket ahead of broadcast (DNS + TCP + TLS done early).
+async function prewarmSockets(endpoints) {
+  await Promise.all(endpoints.map(ep =>
+    rpcPost(ep, 'eth_chainId', [], 4000).then(() => true).catch(() => false)
+  ));
 }
 
 // Treats "already known / nonce too low / replacement underpriced" as a soft-success:
 // the tx (or a better one) is already in flight, so we keep the hash we have.
 function isBenignBroadcastErr(msg) {
-  return /already known|alreadyknown|nonce too low|replacement transaction underpriced|known transaction/i.test(msg || '');
+  return /already known|alreadyknown|nonce too low|replacement transaction underpriced|known transaction|transaction underpriced/i.test(msg || '');
 }
 
-async function broadcastFanout(providers, raw, expectedHash, label) {
-  const attempts = providers.map(({ url, provider }) =>
-    provider.broadcastTransaction(raw)
-      .then(resp => ({ ok: true, hash: resp.hash, url }))
+async function broadcastFanout(endpoints, raw, expectedHash, label) {
+  const attempts = endpoints.map((ep) =>
+    rpcPost(ep, 'eth_sendRawTransaction', [raw])
+      .then(hash => ({ ok: true, hash: hash || expectedHash, url: ep.url }))
       .catch(e => {
         const msg = decodeErr(e);
-        if (isBenignBroadcastErr(msg)) return { ok: true, hash: expectedHash, url, benign: true, msg };
-        return { ok: false, url, msg };
+        if (isBenignBroadcastErr(msg)) return { ok: true, hash: expectedHash, url: ep.url, benign: true, msg };
+        return { ok: false, url: ep.url, msg };
       })
   );
   // Resolve as soon as any RPC accepts it.
@@ -312,8 +366,8 @@ async function main() {
   const sea = new ethers.Contract(seadropAddress, SEADROP_ABI, provider);
   const nft = new ethers.Contract(nftContract, NFT_ABI, provider);
 
-  // Fan-out broadcast providers (primary + any extras).
-  const bcProviders = makeBroadcastProviders(RPC_URL);
+  // Fan-out broadcast endpoints (primary + any extras), with keep-alive sockets.
+  const bcEndpoints = makeBroadcastEndpoints(RPC_URL);
 
   const walletIndices = parseList(args.wallets, keys.map((_, i) => i));
   const wallets = walletIndices.map(i => {
@@ -389,7 +443,7 @@ async function main() {
   console.log(`🔗 Chain          : ${chainId}`);
   console.log(`🎨 NFT            : ${nftContract}`);
   console.log(`🌊 SeaDrop        : ${seadropAddress}`);
-  console.log(`📡 Broadcast RPCs : ${bcProviders.length} endpoint(s)`);
+  console.log(`📡 Broadcast RPCs : ${bcEndpoints.length} endpoint(s)`);
   console.log(`🔁 RBF            : after ${rbfAfterMs}ms, max ${rbfMax}x, bump ${Math.round((rbfBump - 1) * 100)}%`);
   console.log(`💸 Live price     : ${ethers.formatEther(drop.mintPrice)} ETH`);
   console.log(`🎒 Max/wallet     : ${Number(drop.maxTotalMintableByWallet)}`);
@@ -397,10 +451,10 @@ async function main() {
   console.log(`⛽ Gas mode       : ${gas.mode} | maxFee ${gwei(gas.maxFeePerGas)} gwei | prio ${gwei(gas.maxPriorityFeePerGas)} gwei | cap ${gwei(gas.cap)} gwei`);
   console.log(`💰 Fee recipient  : ${shortAddr(feeRecipient)}${drop.restrictFeeRecipients ? ' (restricted)' : ''}`);
 
-  const plans = [];
   console.log('\n👛 Wallet Plan');
   console.log(line('─'));
-  for (const w of wallets) {
+  // Prepare all wallets concurrently (balance, nft balance, mint stats, nonce).
+  const plans = await Promise.all(wallets.map(async (w) => {
     const [balance, nftBal, stats, nonce] = await Promise.all([
       retry(() => provider.getBalance(w.address), `balance ${w.index}`),
       retry(() => nft.balanceOf(w.address), `nft balance ${w.index}`).catch(() => 0n),
@@ -418,12 +472,14 @@ async function main() {
     const value = BigInt(drop.mintPrice) * BigInt(qty);
     const upfront = qty > 0 ? value + gasLimit * gas.maxFeePerGas : 0n;
     const enough = qty > 0 && balance >= upfront;
-    plans.push({ ...w, balance, nftBal, minted, qty, nonce, gasLimit, value, upfront, enough });
-    console.log(`• Wallet ${w.index} ${shortAddr(w.address)}`);
-    console.log(`  Balance ETH    : ${eth(balance)} ETH`);
-    console.log(`  NFT balance    : ${nftBal.toString()} | sudah mint: ${minted}`);
-    console.log(`  Akan mint      : ${qty} NFT`);
-    if (qty > 0) console.log(`  Need upfront   : ${eth(upfront)} ETH (${enough ? 'OK' : 'KURANG'})`);
+    return { ...w, balance, nftBal, minted, qty, nonce, gasLimit, value, upfront, enough };
+  }));
+  for (const p of plans) {
+    console.log(`• Wallet ${p.index} ${shortAddr(p.address)}`);
+    console.log(`  Balance ETH    : ${eth(p.balance)} ETH`);
+    console.log(`  NFT balance    : ${p.nftBal.toString()} | sudah mint: ${p.minted}`);
+    console.log(`  Akan mint      : ${p.qty} NFT`);
+    if (p.qty > 0) console.log(`  Need upfront   : ${eth(p.upfront)} ETH (${p.enough ? 'OK' : 'KURANG'})`);
     else console.log(`  Need upfront   : - (qty 0 / sold out atau limit tercapai)`);
   }
 
@@ -494,16 +550,28 @@ async function main() {
   const ready = signed.filter(s => s.raw);
   console.log(`\n✍️  Pre-signed ${ready.length} tx in parallel @ ${wib(realNow())}`);
 
-  // 3) Wait the final stretch to the exact broadcast moment.
+  // 3) Wait the final stretch, PRE-WARM sockets ~300ms before T0, then fire.
+  //    Warming opens DNS+TCP+TLS early so the broadcast only pays one round-trip.
+  const PREWARM_LEAD = 300;
   if (realNow() < broadcastMs) {
     const wait = broadcastMs - realNow();
-    await sleep(wait);
+    if (wait > PREWARM_LEAD + 50) {
+      await sleep(wait - PREWARM_LEAD);
+      await prewarmSockets(bcEndpoints);
+      const rem = broadcastMs - realNow();
+      if (rem > 0) await sleep(rem);
+    } else {
+      await prewarmSockets(bcEndpoints);
+      const rem = broadcastMs - realNow();
+      if (rem > 0) await sleep(rem);
+    }
   } else {
-    console.log('🟢 Broadcast time sudah lewat/aktif — broadcast sekarang.');
+    console.log('🟢 Broadcast time sudah lewat/aktif — pre-warm & broadcast sekarang.');
+    await prewarmSockets(bcEndpoints);
   }
 
   console.log('\n' + line());
-  console.log(`📨 BROADCAST RAW TX (fan-out ${bcProviders.length} RPC) — ${wib(realNow())}`);
+  console.log(`📨 BROADCAST RAW TX (fan-out ${bcEndpoints.length} RPC, sockets warmed) — ${wib(realNow())}`);
   console.log(line());
   console.log(`💸 Final price    : ${ethers.formatEther(livePrice)} ETH`);
   console.log(`🎒 Final max/wal. : ${liveMaxPerWallet}`);
@@ -521,7 +589,7 @@ async function main() {
 
     for (let attempt = 0; attempt <= rbfMax; attempt++) {
       // Broadcast (fan-out). First RPC to accept wins.
-      const b = await broadcastFanout(bcProviders, raw, expectedHash, `w${s.index}`);
+      const b = await broadcastFanout(bcEndpoints, raw, expectedHash, `w${s.index}`);
       if (b.ok && b.hash) {
         lastHash = b.hash;
         const tag = attempt === 0 ? 'TX' : `RBF#${attempt}`;
