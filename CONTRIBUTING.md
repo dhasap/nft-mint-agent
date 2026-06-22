@@ -4,7 +4,7 @@ Thanks for your interest in improving **nft-mint-agent**! 🎉
 
 ## Ways to contribute
 
-- 🐛 Report bugs via [Issues](../../issues) (use the Bug Report template).
+- 🐛 Report bugs via [Issues](https://github.com/dhasap/nft-mint-agent/issues) (use the Bug Report template).
 - 💡 Propose features via the Feature Request template.
 - 🔧 Open a PR for fixes, new chains, new mint patterns, or docs.
 

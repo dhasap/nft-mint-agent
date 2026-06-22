@@ -20,6 +20,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning foll
 ### Added
 - 15 new security unit tests (`tests/security.test.ts`) executing the actual injected guard logic, the `DirectMinter` price cap, and a `fast-mint` cap regression check (43 tests total).
 
+### Changed
+- **Docs consolidated** — removed 4 redundant/duplicate agent-instruction files (`AGENT.md`, `AGENT_HERMES.md` (byte-identical), `AGENT_CLAUDE_CODE.md`, `AGENT_GENERIC.md`) and a stale root reference stub. Agents now read one router ([`AGENTS.md`](AGENTS.md)) plus the authoritative [`SKILL.md`](SKILL.md). Added a documentation map to the README.
+- **CI** now tests on Node 20 & 22 (dropped EOL Node 18); added `engines: ">=20"`. `vitest@4` requires Node 20+.
+
 ## [3.3.0] - 2026-06-22
 
 ### Added

@@ -1,8 +1,12 @@
 # AGENTS.md
 
-Guidance for AI agents operating this repository. (See also platform-specific files:
-[`AGENT_HERMES.md`](AGENT_HERMES.md), [`AGENT_CLAUDE_CODE.md`](AGENT_CLAUDE_CODE.md),
-[`AGENT_GENERIC.md`](AGENT_GENERIC.md), and the authoritative [`SKILL.md`](SKILL.md).)
+The single entry point for AI agents operating this repository. This file is the concise
+**router**; **[`SKILL.md`](SKILL.md) is the authoritative, detailed definition** (tool schemas,
+full decision tree, and rules). Copy-paste recipes: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+MCP setup: [`docs/MCP.md`](docs/MCP.md).
+
+> This works on any agent platform (Hermes, Claude Code, Cursor, custom MCP hosts). There are no
+> per-platform instruction files — read this, then `SKILL.md`.
 
 ## Your job
 Help the user mint NFTs **on time** and list them safely, choosing the correct execution

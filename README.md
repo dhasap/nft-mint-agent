@@ -172,6 +172,21 @@ nft-mint-agent/
 ## Tech stack
 ethers.js v6 · TypeScript 5.5 · Axios · Seaport v1.6 (EIP-712) · `@modelcontextprotocol/sdk`
 
+## Documentation
+A small, non-redundant set — each file has one job:
+
+| File | Audience | Purpose |
+|---|---|---|
+| [`README.md`](README.md) | Humans | Overview, quick start, features (this file) |
+| [`AGENTS.md`](AGENTS.md) | AI agents | Concise router / decision tree — the agent entry point |
+| [`SKILL.md`](SKILL.md) | AI agents | **Authoritative** definition: tool schemas, full rules |
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Both | Copy-paste command recipes |
+| [`docs/MCP.md`](docs/MCP.md) | Both | MCP server setup & tool/route split |
+| [`SECURITY.md`](SECURITY.md) · [`CHANGELOG.md`](CHANGELOG.md) | Both | Security policy · version history |
+| [`references/`](references/) | Maintainers | Deep-dive operational notes & patterns |
+
+> There are **no per-platform agent files** — `AGENTS.md` + `SKILL.md` work on any host (Hermes, Claude Code, Cursor, custom MCP).
+
 ## Security
 This software handles **private keys** and broadcasts **real transactions**. Use burner wallets,
 never commit `.env`, and read [`SECURITY.md`](SECURITY.md). Report vulnerabilities privately.
