@@ -208,11 +208,11 @@ export class MintScheduler {
             // Expired while we were down — mark as missed
             job.status = 'missed';
             job.error = 'Scheduled time passed while agent was offline';
-            console.log(`[MintScheduler] Job ${job.id} missed (expired while offline)`);
+            console.error(`[MintScheduler] Job ${job.id} missed (expired while offline)`);
           } else {
             // Re-schedule (BUG-002 FIX: chunk long delays)
             this.armTimer(job.id, delay);
-            console.log(`[MintScheduler] Re-scheduled job ${job.id} — fires in ${Math.round(delay / 1000)}s`);
+            console.error(`[MintScheduler] Re-scheduled job ${job.id} — fires in ${Math.round(delay / 1000)}s`);
           }
         }
       }
