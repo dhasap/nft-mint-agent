@@ -62,7 +62,7 @@ printf '%s\n%s\n' \
  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | node mcp-server.mjs
 ```
 
-You should see 16 tools listed. Logs go to **stderr**; stdout is the protocol channel.
+You should see 19 tools listed. Logs go to **stderr**; stdout is the protocol channel.
 
 ## Safety
 

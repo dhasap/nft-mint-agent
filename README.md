@@ -105,10 +105,11 @@ node fast-mint.mjs --url "https://opensea.io/collection/<slug>/overview" \
 broadcast; wallets must afford `mintPrice*qty + gasLimit*maxFeePerGas` upfront; signing/broadcasting/
 listing require explicit user confirmation.
 
-## Tools (16)
+## Tools (19)
 **Information & detection:** `parse_mint_link` · `detect_contract` · `check_wallets` · `get_mint_schedule` · `get_mint_status` · `scrape_contract_from_website` · `get_skill_health`
 **Execution:** `mint_nft` · `browser_mint` · `schedule_mint` · `list_scheduled_mints` · `cancel_scheduled_mint` · `cancel_pending_tx`
 **Listing:** `approve_seaport` · `list_nft` · `batch_list_nfts`
+**Signing proxy (browser minting aman — key tidak pernah masuk browser):** `start_signing_proxy` · `stop_signing_proxy` · `get_signing_proxy_status`
 
 Full schemas and examples: [`SKILL.md`](SKILL.md). For agents, start at [`AGENTS.md`](AGENTS.md).
 

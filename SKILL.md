@@ -119,7 +119,7 @@ Three equivalent surfaces — pick per situation:
 - **CLI runner**: `cd /root/nft-mint-agent && node runner.mjs <tool_name> '<json_params>'`. The runner **validates required params + types** and returns a structured JSON error (`{"success":false,"error":"invalid arguments","details":[...] }`) — read `details` and retry.
 - **Competitive mint**: `node fast-mint.mjs ...` (CLI only, never via MCP — latency).
 
-### Tools (16)
+### Tools (19)
 
 **Information & detection**
 ```bash
@@ -143,7 +143,15 @@ node runner.mjs list_scheduled_mints '{}'
 node runner.mjs cancel_scheduled_mint '{"job_id":"mint_1234567890_1"}'
 
 # Browser fallback for Connect Wallet / server-signature sites; slower, sequential.
-node runner.mjs browser_mint '{"url":"https://example-mint-site.fun","wallet_indices":[0,1]}'
+# REKOMENDASI: signing "proxy" (key TIDAK pernah masuk browser — server WS + guard).
+#   Browser Use cloud: relay otomatis fallback ke bridge (window.__signQ/__signR);
+#   agent memproses tiap request via node bridge-client.mjs --req '<json>' --token <TOKEN>.
+#   Browser lokal: ws://127.0.0.1 langsung (tanpa bridge).
+node runner.mjs start_signing_proxy '{"publish":false}'
+node runner.mjs browser_mint '{"url":"https://example-mint-site.fun","wallet_indices":[0,1],"signing":"proxy"}'
+node runner.mjs get_signing_proxy_status '{}'
+node runner.mjs stop_signing_proxy '{}'   # WAJIB setelah selesai (revoke token)
+# Mode legacy (berisiko — key di browser memory): hapus "signing":"proxy".
 ```
 
 **Listing / tx management** — always discuss listing price first; never auto-list.

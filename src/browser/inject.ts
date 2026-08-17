@@ -131,6 +131,10 @@ export function generateBrowserMintScripts(
     maxTxValueEth?: number;
     /** Allow eth_signTypedData_* (Seaport orders / permits). Default false. */
     allowOrderSigning?: boolean;
+    /** 'embedded' = private key in browser (legacy). 'proxy' = keys stay on agent via signing proxy (recommended). Default: 'embedded'. */
+    signing?: 'embedded' | 'proxy';
+    /** Signing proxy endpoint + token (required when signing==='proxy'). */
+    proxy?: { wsUrl: string; token: string };
   }
 ): BrowserMintResult {
   const wallets = walletManager.getAllWallets();
@@ -138,6 +142,7 @@ export function generateBrowserMintScripts(
   const chainId = walletManager.getChainId();
   const chainIdHex = '0x' + chainId.toString(16);
   const indicesToUse = options.walletIndices || wallets.map(w => w.index);
+  const proxyMode = options.signing === 'proxy' && !!options.proxy;
 
   // Safety guard parameters shared by all injected scripts.
   const allowedTo = (options.allowedContracts || []).filter(a => /^0x[a-fA-F0-9]{40}$/.test(a));
@@ -160,12 +165,30 @@ export function generateBrowserMintScripts(
     ],
   };
 
+  if (proxyMode) {
+    result.warnings = [
+      'Signing proxy mode: PRIVATE KEYS NEVER ENTER THE BROWSER.',
+      `Signing happens on the agent machine (${options.proxy!.wsUrl}).`,
+      'Browser holds only the wallet address + a session token (revoked on stop).',
+      'Stop the signing proxy after minting: stop_signing_proxy.',
+      'Browser minting is SEQUENTIAL (one wallet at a time), slower than direct mint (PARALLEL).',
+    ];
+  }
+
   // Generate per-wallet injection scripts
   for (const idx of indicesToUse) {
     const wallet = wallets.find(w => w.index === idx);
     if (!wallet) continue;
 
-    const script = generateSingleWalletScript(wallet, rpcUrl, chainId, chainIdHex, guardJs);
+    const script = proxyMode && options.proxy
+      ? generateProxyRelayScript({
+          wsUrl: options.proxy.wsUrl,
+          token: options.proxy.token,
+          address: wallet.address,
+          chainId,
+          chainIdHex,
+        })
+      : generateSingleWalletScript(wallet, rpcUrl, chainId, chainIdHex, guardJs);
 
     result.walletScripts.push({
       walletIndex: idx,
@@ -175,13 +198,23 @@ export function generateBrowserMintScripts(
   }
 
   // Generate multi-wallet rotation script
-  result.multiWalletScript = generateMultiWalletScript(
-    wallets.filter(w => indicesToUse.includes(w.index)),
-    rpcUrl,
-    chainId,
-    chainIdHex,
-    guardJs,
-  );
+  if (proxyMode && options.proxy) {
+    result.multiWalletScript = generateProxyMultiWalletScript(
+      wallets.filter(w => indicesToUse.includes(w.index)),
+      options.proxy.wsUrl,
+      options.proxy.token,
+      chainId,
+      chainIdHex,
+    );
+  } else {
+    result.multiWalletScript = generateMultiWalletScript(
+      wallets.filter(w => indicesToUse.includes(w.index)),
+      rpcUrl,
+      chainId,
+      chainIdHex,
+      guardJs,
+    );
+  }
 
   result.warnings.push(
     allowedTo.length
@@ -194,7 +227,10 @@ export function generateBrowserMintScripts(
   result.autoClickScript = generateAutoClickScript();
 
   // Generate step-by-step guide
-  result.stepByStepGuide = generateStepByStepGuide(options.url, result.walletScripts);
+  result.stepByStepGuide = generateStepByStepGuide(options.url, result.walletScripts, {
+    proxyMode,
+    wsUrl: options.proxy?.wsUrl,
+  });
 
   return result;
 }
@@ -760,53 +796,63 @@ function generateAutoClickScript(): string {
 /**
  * Generate step-by-step guide for the agent
  */
-function generateStepByStepGuide(url: string, walletScripts: WalletScript[]): string[] {
+/**
+ * Generate step-by-step guide for the agent
+ * Works on BOTH Browser Use cloud (js() — the modern Hermes browser) and
+ * local browsers (paste into DevTools console).
+ */
+function generateStepByStepGuide(
+  url: string,
+  walletScripts: WalletScript[],
+  opts: { proxyMode?: boolean; wsUrl?: string } = {},
+): string[] {
   const steps: string[] = [];
 
   steps.push('=== BROWSER MINTING - STEP BY STEP ===');
   steps.push('');
   steps.push(`Website: ${url}`);
   steps.push(`Wallets: ${walletScripts.length} wallet(s)`);
+  steps.push(`Signing mode: ${opts.proxyMode ? 'PROXY (keys on agent)' : 'EMBEDDED (key in browser — legacy)'}`);
+  if (opts.proxyMode && opts.wsUrl) steps.push(`Signing proxy: ${opts.wsUrl}`);
   steps.push('');
+  steps.push('Runner: Hermes browser (Browser Use cloud) -> gunakan js(); browser lokal -> paste di DevTools console.');
 
+  steps.push('');
   steps.push('--- STEP 1: Navigate to website ---');
-  steps.push(`browser_navigate(url="${url}")`);
+  steps.push('Hermes (Browser Use):  new_tab(url) / goto_url, lalu wait_for_load()');
+  steps.push('Lokal:                 buka URL di browser, tekan F12 -> Console');
   steps.push('');
 
-  steps.push('--- STEP 2: Wait for page to load ---');
-  steps.push('browser_wait(duration=5)');
+  steps.push('--- STEP 2: Inject Wallet 0 ---');
+  steps.push('Hermes (Browser Use):  js(<WALLET_0_INJECT_SCRIPT>) - script dari walletScripts[0].injectScript');
+  steps.push('Lokal:                 tempel script utuh di Console, Enter');
+  steps.push('Praktek terbaik: untuk Browser Use, daftarkan script via Page.addScriptToEvaluateOnNewDocument SEBELUM navigasi supaya window.ethereum sudah ada dari awal.');
   steps.push('');
 
-  steps.push('--- STEP 3: Inject Wallet 0 ---');
-  steps.push(`browser_console(expression="<WALLET_0_INJECT_SCRIPT>")`);
-  steps.push('💡 Copy the inject script from walletScripts[0].injectScript');
+  steps.push('--- STEP 3: Wait for wallet to initialize ---');
+  steps.push('Tunggu ~3-5 detik (proxy: koneksi WebSocket; embedded: load ethers CDN).');
   steps.push('');
 
-  steps.push('--- STEP 4: Wait for wallet to initialize ---');
-  steps.push('browser_wait(duration=3)');
+  steps.push('--- STEP 4: Click Connect Wallet ---');
+  steps.push('Hermes: js("document.querySelector(\'button\')?.click()") atau pakai autoClickScript');
+  steps.push('Lokal: klik tombol di halaman (atau jalankan autoClickScript di console)');
   steps.push('');
 
-  steps.push('--- STEP 5: Click Connect Wallet ---');
-  steps.push('Run auto-click script to find buttons, then click Connect');
-  steps.push('browser_console(expression="document.querySelector(\'button\')?.click()")');
-  steps.push('💡 Or use autoClickScript to find the right button');
+  steps.push('--- STEP 5: Wait for connection ---');
+  steps.push('Tunggu ~3 detik, lalu verifikasi: js("window.ethereum.request({method:\'eth_requestAccounts\'})")');
   steps.push('');
 
-  steps.push('--- STEP 6: Wait for connection ---');
-  steps.push('browser_wait(duration=3)');
+  steps.push('--- STEP 6: Click Mint ---');
+  steps.push('Hermes: js("document.querySelector(\'[class*=mint]\')?.click()") atau autoClickScript');
+  steps.push('Lokal: klik tombol Mint di halaman');
   steps.push('');
 
-  steps.push('--- STEP 7: Click Mint ---');
-  steps.push('browser_console(expression="document.querySelector(\'[class*=mint]\')?.click()")');
-  steps.push('💡 Or use autoClickScript to find the Mint button');
-  steps.push('');
-
-  steps.push('--- STEP 8: Wait for TX confirmation ---');
-  steps.push('browser_wait(duration=10)');
+  steps.push('--- STEP 7: Wait for TX confirmation ---');
+  steps.push('Tunggu 10-30 detik. Verifikasi: eth_getTransactionReceipt via js() atau get_mint_status.');
   steps.push('');
 
   if (walletScripts.length > 1) {
-    steps.push('--- STEP 9+: Repeat for other wallets ---');
+    steps.push('--- STEP 8+: Repeat for other wallets ---');
     steps.push('For each additional wallet:');
     steps.push('  a. Inject next wallet script (overwrites window.ethereum)');
     steps.push('  b. Wait 3 seconds');
@@ -815,12 +861,25 @@ function generateStepByStepGuide(url: string, walletScripts: WalletScript[]): st
     steps.push('  e. Click Mint');
     steps.push('  f. Wait for TX');
     steps.push('');
-    steps.push('💡 Or use multiWalletScript for automatic rotation');
+    steps.push('💡 Atau gunakan multiWalletScript untuk rotation otomatis');
   }
 
   steps.push('');
+  steps.push('--- BRIDGE MODE (Browser Use cloud — WS lokal tidak reachable) ---');
+  steps.push('Relay otomatis fallback ke antrian window.__signQ/__signR. Agent memproses tiap request:');
+  steps.push('  1. js("window.__signQ && window.__signQ.length ? JSON.stringify(window.__signQ.shift()) : \'null\'")');
+  steps.push('  2. node bridge-client.mjs --req \'<json dari langkah 1>\' --token <TOKEN> (token di data/signing_proxy.json)');
+  steps.push('  3. js("window.__signR[" + id + "] = " + JSON.stringify({result: <hasil>}))  — atau {error:{message}} untuk error');
+  steps.push('Ulangi sampai antrian kosong (biasanya flow: eth_requestAccounts -> eth_estimateGas -> eth_sendTransaction).');
+  steps.push('');
+
   steps.push('--- CLEANUP ---');
-  steps.push('Destroy browser instance after minting to clear private keys from memory');
+  if (opts.proxyMode) {
+    steps.push('Proxy mode: STOP signing proxy setelah minting (stop_signing_proxy) - token langsung mati.');
+    steps.push('Tutup browser sesi (Hermes: cdp("Browser.close")) - provider tidak pegang key, tapi tetap rapi.');
+  } else {
+    steps.push('EMBEDDED mode: DESTROY browser instance segera - private key ada di memori browser!');
+  }
 
   return steps;
 }
@@ -889,5 +948,143 @@ export function generateMintDetectionScript(contractAddress: string): string {
       ? '⚠️ Contract membutuhkan SERVER SIGNATURE. WAJIB pakai browser minting.'
       : '✅ Standard mint function terdeteksi. Bisa pakai direct contract minting (mint_nft).',
   }, null, 2);
+})()`;
+}
+
+/**
+ * Generate a proxy-mode wallet relay script (NO private key inside).
+ * window.ethereum relays JSON-RPC over WebSocket to the signing proxy
+ * (keys stay on the agent machine). Works in Browser Use cloud (via js())
+ * and local browsers (DevTools console). Safe to install BEFORE page
+ * scripts via Page.addScriptToEvaluateOnNewDocument.
+ */
+export function generateProxyRelayScript(opts: {
+  wsUrl: string;
+  token: string;
+  address: string;
+  chainId: number;
+  chainIdHex: string;
+}): string {
+  const wsWithToken = opts.wsUrl
+    .replace('https://', 'wss://')
+    .replace('http://', 'ws://')
+    + (opts.wsUrl.includes('?') ? '&' : '?') + 'token=' + opts.token;
+  return `// === Wallet Relay Script (PROXY MODE) - Wallet: ${opts.address} ===
+// PRIVATE KEY TIDAK ADA DI SCRIPT INI. Signing via WebSocket ke signing proxy.
+// Browser Use: js(<script>) | Lokal: paste di DevTools console.
+
+(() => {
+  const __WS = ${JSON.stringify(wsWithToken)};
+  const __ADDR = ${JSON.stringify(opts.address)};
+  const __CHAIN_ID = ${JSON.stringify(opts.chainIdHex)};
+  let __sock = null;
+  let __queue = [];
+  let __id = 0;
+  const __pending = new Map();
+
+  const __send = (msg) => {
+    if (__sock && __sock.readyState === 1) __sock.send(JSON.stringify(msg));
+    else __queue.push(msg);
+  };
+  const __wsCall = (method, params) => new Promise((resolve, reject) => {
+    const id = ++__id;
+    __pending.set(id, { resolve, reject });
+    __send({ id, method, params: params || [], __addr: __ADDR });
+    setTimeout(() => {
+      if (__pending.has(id)) { __pending.delete(id); reject(new Error('signing proxy timeout')); }
+    }, 45000);
+  });
+
+  // Bridge fallback: dipakai kalau WebSocket tidak reachable (browser cloud).
+  // Agent membaca window.__signQ, memproses via signing proxy lokal, lalu
+  // menulis hasil ke window.__signR[id].
+  if (!window.__signQ) window.__signQ = [];
+  if (!window.__signR) window.__signR = {};
+  const __bridgeCall = (method, params) => new Promise((resolve, reject) => {
+    const id = ++__id;
+    window.__signQ.push({ id, method, params: params || [], __addr: __ADDR });
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      const r = window.__signR[id];
+      if (r !== undefined) {
+        clearInterval(iv); delete window.__signR[id];
+        if (r && r.error) reject(new Error(String(r.error.message || 'proxy error')));
+        else resolve(r && r.result);
+      } else if (Date.now() - t0 > 45000) {
+        clearInterval(iv); delete window.__signR[id];
+        reject(new Error('signing bridge timeout'));
+      }
+    }, 250);
+  });
+
+  const __call = (method, params) =>
+    (__sock && __sock.readyState === 1) ? __wsCall(method, params) : __bridgeCall(method, params);
+
+  try {
+    __sock = new WebSocket(__WS);
+    __sock.onopen = () => { while (__queue.length) { __sock.send(JSON.stringify(__queue.shift())); } };
+    __sock.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      const p = __pending.get(m.id);
+      if (!p) return;
+      __pending.delete(m.id);
+      if (m.error) p.reject(new Error(String(m.error.message || 'proxy error')));
+      else p.resolve(m.result);
+    };
+    __sock.onclose = () => { __sock = null; };
+    __sock.onerror = () => {};
+  } catch (e) {
+    console.error('[WalletRelay] WS gagal:', e);
+  }
+
+  const provider = {
+    isMetaMask: true,
+    isConnected: () => true,
+    selectedAddress: __ADDR,
+    chainId: __CHAIN_ID,
+    _state: { accounts: [__ADDR], isConnected: true, isUnlocked: true, initialized: true },
+    request: (req) => __call((req || {}).method, (req || {}).params),
+    sendAsync: (payload, cb) => {
+      __call(payload.method, payload.params || [])
+        .then(r => cb(null, { jsonrpc: '2.0', id: payload.id, result: r }))
+        .catch(e => cb(e, null));
+    },
+    on: () => {},
+    removeListener: () => {},
+    removeAllListeners: () => {},
+  };
+  window.ethereum = provider;
+  try { window.dispatchEvent(new Event('ethereum#initialized')); } catch {}
+  return 'relay installed: ' + __ADDR;
+})()`;
+}
+
+/**
+ * Multi-wallet rotation for proxy mode: installs each wallet relay in turn.
+ * Page interaction (connect/mint) is agent-driven between rotations.
+ */
+export function generateProxyMultiWalletScript(
+  wallets: { index: number; address: string }[],
+  wsUrl: string,
+  token: string,
+  chainId: number,
+  chainIdHex: string,
+): string {
+  const relays = wallets.map(w =>
+    `    { address: '${w.address}', script: ${JSON.stringify(generateProxyRelayScript({ wsUrl, token, address: w.address, chainId, chainIdHex }))} },`
+  ).join('\n');
+  return `// === Multi-Wallet Relay Rotation (PROXY MODE) ===
+// Install relai wallet satu per satu; interaksi halaman dilakukan agent di antara rotasi.
+
+(async () => {
+  const relays = [
+${relays}
+  ];
+  const out = [];
+  for (const r of relays) {
+    (0, eval)(r.script);
+    out.push({ address: r.address, installed: true });
+  }
+  return JSON.stringify(out, null, 2);
 })()`;
 }

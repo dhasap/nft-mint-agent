@@ -21,6 +21,7 @@ import { AutoLister, ListResult } from '../listing';
 import { MintScheduler, MintScheduleInfo, ScheduledMintJob } from '../scheduler';
 import { scrapeContractFromWebsite, ScrapeResult } from '../browser/scrape';
 import { generateBrowserMintScripts, BrowserMintResult, generateMintDetectionScript } from '../browser/inject';
+import { startSigningProxy, stopSigningProxy, getSigningProxyStatus } from '../browser/signing';
 import { shortAddress, shortTxHash, truncate, isValidAddress, withRetry } from '../utils';
 import { GasOracle, resolveGasMode } from '../gas/oracle';
 
@@ -280,7 +281,7 @@ export const SKILL_DEFINITION = {
     },
     {
       name: 'browser_mint',
-      description: 'Generate browser scripts untuk minting via website yang membutuhkan Connect Wallet atau server signature. Tool ini menghasilkan: (1) Wallet injection script (custom window.ethereum yang auto-sign TX), (2) Auto-click script untuk Connect/Mint buttons, (3) Multi-wallet rotation script, (4) Step-by-step guide. Agent menjalankan script ini via browser_console(). FALLBACK: Gunakan hanya jika direct contract minting (mint_nft) gagal karena butuh server signature.',
+      description: 'Generate browser scripts untuk minting via website yang membutuhkan Connect Wallet atau server signature. Mode signing: "proxy" (RECOMMENDED — private key tidak pernah masuk browser; jalankan via js() di Browser Use atau paste di console browser lokal) atau "embedded" (legacy — key di browser memory, risiko tinggi). Tool menghasilkan: wallet injection/relay script, auto-click script, multi-wallet rotation, step-by-step guide. FALLBACK: gunakan hanya jika direct contract minting (mint_nft) gagal karena butuh server signature.',
       parameters: {
         type: 'object',
         properties: {
@@ -292,6 +293,27 @@ export const SKILL_DEFINITION = {
             type: 'array',
             items: { type: 'number' },
             description: 'Index wallet yang dipakai. Kosongkan = semua wallet.',
+          },
+          signing: {
+            type: 'string',
+            enum: ['proxy', 'embedded'],
+            description: "'proxy' = key stay di agent (aman, default). 'embedded' = key di browser (legacy, berisiko).",
+          },
+          publish: {
+            type: 'boolean',
+            description: 'Proxy: buat tunnel publik untuk Browser Use cloud (default true). false = localhost saja (browser lokal).',
+          },
+          allowed_contracts: {
+            type: 'array', items: { type: 'string' },
+            description: 'Allowlist kontrak penerima tx (kosong = semua, selector blocklist tetap aktif).',
+          },
+          max_tx_value_eth: {
+            type: 'string',
+            description: 'Cap nilai tx per transaksi dalam ETH (default MAX_MINT_PRICE_ETH).',
+          },
+          allow_order_signing: {
+            type: 'boolean',
+            description: 'Izinkan eth_signTypedData/personal_sign (Seaport order). Default: false.',
           },
         },
         required: ['url'],
@@ -317,6 +339,30 @@ export const SKILL_DEFINITION = {
         },
         required: ['tx_hash', 'wallet_index'],
       },
+    },
+    {
+      name: 'start_signing_proxy',
+      description: 'Start signing proxy untuk browser minting AMAN: private key tidak pernah masuk browser. Server WebSocket berjalan di agent (key di sini), browser cuma dapat relay script (ws url + token + address). Opsional tunnel publik cloudflared (publish=true) agar browser remote Browser Use cloud bisa terhubung. Setiap request signing divalidasi ulang di server (block selector berbahaya, value cap, contract allowlist, chainId). Wajib stop_signing_proxy setelah selesai.',
+      parameters: {
+        type: 'object',
+        properties: {
+          publish: { type: 'boolean', description: 'Buat tunnel publik (cloudflared) untuk browser remote (Browser Use cloud). Default: true. false = hanya ws://127.0.0.1 (browser lokal).' },
+          port: { type: 'number', description: 'Port lokal (default 18545)' },
+          allowed_contracts: { type: 'array', items: { type: 'string' }, description: 'Allowlist kontrak penerima tx (kosong = semua, selector blocklist tetap aktif)' },
+          max_tx_value_eth: { type: 'string', description: 'Cap nilai tx per transaksi dalam ETH (default MAX_MINT_PRICE_ETH)' },
+          allow_order_signing: { type: 'boolean', description: 'Izinkan eth_signTypedData/personal_sign (untuk Seaport order). Default: false.' },
+        },
+      },
+    },
+    {
+      name: 'stop_signing_proxy',
+      description: 'Stop signing proxy (server + tunnel) dan revoke token. WAJIB dijalankan SETELAH browser minting selesai.',
+      parameters: { type: 'object', properties: {} },
+    },
+    {
+      name: 'get_signing_proxy_status',
+      description: 'Cek status signing proxy: running?, wsUrl (lokal/publik), chain, pid, waktu start.',
+      parameters: { type: 'object', properties: {} },
     },
   ],
 };
@@ -1013,6 +1059,11 @@ export async function tool_scrape_contract_from_website(params: { url: string })
 export async function tool_browser_mint(params: {
   url: string;
   wallet_indices?: number[];
+  signing?: 'proxy' | 'embedded';
+  publish?: boolean;
+  allowed_contracts?: string[];
+  max_tx_value_eth?: string;
+  allow_order_signing?: boolean;
 }): Promise<{
   success: boolean;
   data: BrowserMintResult;
@@ -1025,12 +1076,47 @@ export async function tool_browser_mint(params: {
   }
 
   try {
+    const signingMode = params.signing === 'proxy' ? 'proxy' : 'embedded';
+    let proxyInfo: { wsUrl: string; token: string; publicUrl: string | null } | null = null;
+    let proxyStarted = false;
+
+    if (signingMode === 'proxy') {
+      const status = getSigningProxyStatus();
+      if (status.running && status.state) {
+        const s = status.state;
+        proxyInfo = { wsUrl: s.publicUrl || s.wsUrl, token: s.token, publicUrl: s.publicUrl };
+      } else {
+        const s = await startSigningProxy({
+          publish: params.publish !== false,
+          allowedContracts: params.allowed_contracts,
+          maxTxValueEth: params.max_tx_value_eth !== undefined ? parseFloat(params.max_tx_value_eth) : undefined,
+          allowOrderSigning: params.allow_order_signing,
+        });
+        proxyInfo = { wsUrl: s.publicUrl || s.wsUrl, token: s.token, publicUrl: s.publicUrl };
+        proxyStarted = true;
+      }
+    }
+
     const scripts = generateBrowserMintScripts(config, walletManager, {
       url: params.url,
       walletIndices: params.wallet_indices,
+      signing: signingMode,
+      proxy: proxyInfo ? { wsUrl: proxyInfo.wsUrl, token: proxyInfo.token } : undefined,
+      allowedContracts: params.allowed_contracts,
+      maxTxValueEth: params.max_tx_value_eth !== undefined ? parseFloat(params.max_tx_value_eth) : undefined,
+      allowOrderSigning: params.allow_order_signing,
     });
 
     let message = `🌐 *Browser Minting Scripts Generated*\n\n`;
+    if (signingMode === 'proxy' && proxyInfo) {
+      message += `🔒 *MODE: SIGNING PROXY (private key TIDAK di browser)*\n`;
+      message += `   Relay WS: ${proxyInfo.wsUrl}\n`;
+      message += `   ${proxyInfo.publicUrl ? '🌍 Tunnel publik aktif (Browser Use cloud bisa connect)' : '⚠️ Localhost saja (khusus browser lokal)'}\n`;
+      message += `   ${proxyStarted ? '🆕 Proxy auto-start. WAJIB stop_signing_proxy setelah minting selesai!' : 'ℹ️ Proxy sudah berjalan dari sesi sebelumnya.'}\n\n`;
+    } else {
+      message += `⚠️ *MODE: EMBEDDED (private key di browser memory — LEGACY, berisiko)*\n`;
+      message += `   Lebih aman: signing:"proxy".\n\n`;
+    }
     message += `📍 URL: ${params.url}\n`;
     message += `💼 Wallets: ${scripts.walletScripts.length}\n\n`;
 
@@ -1062,6 +1148,7 @@ export async function tool_browser_mint(params: {
     message += `\n`;
 
     // Decision helper
+    message += `🚀 *Eksekusi:* Browser Use cloud → js(script); browser lokal → paste di DevTools console.\n\n`;
     message += `💡 *Decision Helper:*\n`;
     message += `   Coba dulu detect_contract() → kalau function signature:\n`;
     message += `   • mint(uint256) → ✅ Pakai mint_nft (lebih cepat, parallel)\n`;
@@ -1072,6 +1159,75 @@ export async function tool_browser_mint(params: {
   } catch (err: any) {
     return { success: false, data: null as any, message: `❌ Browser mint script generation gagal: ${err.message?.slice(0, 300)}` };
   }
+}
+
+// Tool: start_signing_proxy
+export async function tool_start_signing_proxy(params: {
+  publish?: boolean;
+  port?: number;
+  allowed_contracts?: string[];
+  max_tx_value_eth?: string;
+  allow_order_signing?: boolean;
+}): Promise<{
+  success: boolean;
+  data: any;
+  message: string;
+}> {
+  initialize();
+  try {
+    const s = await startSigningProxy({
+      publish: params.publish !== false,
+      port: params.port,
+      allowedContracts: params.allowed_contracts,
+      maxTxValueEth: params.max_tx_value_eth !== undefined ? parseFloat(params.max_tx_value_eth) : undefined,
+      allowOrderSigning: params.allow_order_signing,
+    });
+    let message = `🔒 *Signing Proxy Started*\n\n`;
+    message += `🔑 Token: ${s.token.slice(0, 8)}... (${s.token.length} chars — ada di data/signing_proxy.json)\n`;
+    message += `🔗 Local WS: ${s.wsUrl}\n`;
+    message += s.publicUrl ? `🌍 Tunnel publik: ${s.publicUrl}\n` : `⚠️ Tunnel publik GAGAL — hanya browser lokal (ws://127.0.0.1).\n`;
+    message += `🔗 Chain: ${s.chain}\n`;
+    message += `🆔 PID: ${s.pid}\n\n`;
+    message += `⚠️ Private key TIDAK pernah masuk browser. Setelah minting selesai, JANGAN LUPA: stop_signing_proxy.`;
+    return { success: true, data: s, message };
+  } catch (err: any) {
+    return { success: false, data: null as any, message: `❌ Gagal start signing proxy: ${err.message?.slice(0, 300)}` };
+  }
+}
+
+// Tool: stop_signing_proxy
+export async function tool_stop_signing_proxy(): Promise<{
+  success: boolean;
+  data: { stopped: boolean; hadState: boolean };
+  message: string;
+}> {
+  initialize();
+  const res = stopSigningProxy();
+  if (res.hadState && res.stopped) {
+    return { success: true, data: res, message: `🛑 Signing proxy di-STOP. Token revoked. Server + tunnel dimatikan.` };
+  }
+  return { success: false, data: res, message: `ℹ️ Tidak ada signing proxy yang berjalan (state kosong).` };
+}
+
+// Tool: get_signing_proxy_status
+export async function tool_get_signing_proxy_status(): Promise<{
+  success: boolean;
+  data: any;
+  message: string;
+}> {
+  initialize();
+  const { running, state } = getSigningProxyStatus();
+  if (running && state) {
+    let message = `🔒 *Signing Proxy Status: RUNNING*\n\n`;
+    message += `🔗 Local WS: ${state.wsUrl}\n`;
+    if (state.publicUrl) message += `🌍 Tunnel publik: ${state.publicUrl}\n`;
+    message += `🔗 Chain: ${state.chain}\n`;
+    message += `🆔 PID: ${state.pid}${state.cloudflaredPid ? ` | cloudflared: ${state.cloudflaredPid}` : ''}\n`;
+    message += `🕘 Started: ${new Date(state.startedAt).toISOString()}\n\n`;
+    message += `⚠️ JANGAN LUPA stop_signing_proxy setelah minting selesai.`;
+    return { success: true, data: { running, state }, message };
+  }
+  return { success: true, data: { running: false, state: null }, message: `ℹ️ Signing proxy TIDAK berjalan.` };
 }
 
 // ============================================================
@@ -1269,4 +1425,7 @@ export const TOOLS = {
   browser_mint: tool_browser_mint,
   get_skill_health: tool_get_skill_health,
   cancel_pending_tx: tool_cancel_pending_tx,
+  start_signing_proxy: tool_start_signing_proxy,
+  stop_signing_proxy: tool_stop_signing_proxy,
+  get_signing_proxy_status: tool_get_signing_proxy_status,
 };
