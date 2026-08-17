@@ -57,6 +57,7 @@ const SEADROP_CANDIDATES = {
   10: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
   137: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
   42161: ['0x00005ea67ac36d4aa7f7be4d33385971bae75dee'],
+  4663: ['0x00005EA00Ac477B1030CE78506496e8C2dE24bf5'],
 };
 
 const SEADROP_ABI = [
@@ -739,6 +740,7 @@ function explorerTxUrl(chainId, txHash) {
     10: 'https://optimistic.etherscan.io', 11155420: 'https://sepolia-optimism.etherscan.io',
     8453: 'https://basescan.org', 84532: 'https://sepolia.basescan.org',
     7777777: 'https://explorer.zora.energy', 81457: 'https://blastscan.io',
+    4663: 'https://robinhoodchain.blockscout.com',
   };
   const base = EXPLORERS[chainId] || 'https://etherscan.io';
   return `${base}/tx/${txHash}`;

@@ -28,3 +28,6 @@ data/*
 # Logs & OS
 *.log
 .DS_Store
+
+# Alchemy signup password (local only)
+.alchemy-account.txt

@@ -138,6 +138,7 @@ See [`.env.example`](.env.example) for the full list.
 | Base | 8453 | Full |
 | Zora | 7777777 | Partial (different protocol) |
 | Blast | 81457 | Full |
+| Robinhood Chain | 4663 | Full (OpenSea/SeaDrop) |
 
 ## Architecture
 ```

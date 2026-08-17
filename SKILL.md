@@ -211,7 +211,7 @@ Scheduled non-competitive mint:
 
 ## Supported chains
 
-Ethereum (1), Polygon (137), Arbitrum (42161), Optimism (10), Base (8453), Zora (7777777, partial — different protocol), Blast (81457). SeaDrop candidate addresses must still be verified on-chain.
+Ethereum (1), Polygon (137), Arbitrum (42161), Optimism (10), Base (8453), Robinhood Chain (4663, OpenSea/SeaDrop — SeaDrop V1 0x00005EA00... verified on-chain), Zora (7777777, partial — different protocol), Blast (81457). SeaDrop candidate addresses must still be verified on-chain.
 
 ## Linked references
 
