@@ -50,7 +50,39 @@ node runner.mjs schedule_mint '{"contract_address":"0x...","mint_price_eth":"0.0
 node runner.mjs list_scheduled_mints '{}'
 ```
 
-## 5. Verify + list (after minting)
+## 5. Browser minting (Connect Wallet / server-signature sites) — AMAN via signing proxy
+
+Private key TIDAK pernah masuk browser. Flow lengkap: [`docs/SIGNING_PROXY.md`](../docs/SIGNING_PROXY.md).
+
+```bash
+# 1. Start proxy (tunnel untuk browser cloud; localhost cukup untuk browser lokal)
+node runner.mjs start_signing_proxy '{"publish":true}'
+
+# 2. Generate relay script (keyless!)
+node runner.mjs browser_mint '{"url":"https://example-mint-site.fun","signing":"proxy","wallet_indices":[0,1]}'
+
+# 3a. Browser LOKAL: buka situs → F12 Console → paste walletScripts[i].injectScript
+# 3b. Browser Use CLOUD: js(script). Kalau WS lokal tidak reachable, relay otomatis
+#     fallback ke bridge — untuk tiap request di window.__signQ:
+#       node bridge-client.mjs --req '<json>' --token <TOKEN>   (token: data/signing_proxy.json)
+#       lalu js('window.__signR[<id>] = {"result": ...}')
+
+# 4. Selesai — WAJIB:
+node runner.mjs stop_signing_proxy '{}'
+```
+
+## 6. Robinhood Chain (chainId 4663)
+
+Referensi: [`references/robinhood-chain.md`](../references/robinhood-chain.md)
+
+```bash
+# .env: CHAIN=robinhood + RPC_URL (GetBlock / rpc.mainnet.chain.robinhood.com)
+node runner.mjs check_wallets '{}'
+node runner.mjs get_mint_schedule '{"contract_address":"0x..."}'
+# fast-mint L2: --rbf-after-ms 3000, tip rendah (0.1-1 gwei)
+```
+
+## 7. Verify + list (after minting)
 ```bash
 node runner.mjs get_mint_status '{"tx_hash":"0x..."}'
 # Listing — ALWAYS confirm price with the user first

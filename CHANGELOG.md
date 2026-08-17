@@ -3,6 +3,37 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Signing proxy for browser minting** — private keys NEVER enter the browser.
+  `start_signing_proxy` / `stop_signing_proxy` / `get_signing_proxy_status` tools plus
+  `browser_mint` `signing:"proxy"` mode. A local WebSocket signing server
+  (`src/browser/proxy-server.ts`) re-validates every request server-side
+  (dangerous-selector blocklist, per-tx value cap, contract allowlist, chainId,
+  from-mismatch) before signing and broadcasting. Relay scripts are keyless and use
+  **dual transport**: WebSocket for local browsers, automatic **bridge fallback**
+  (`window.__signQ`/`__signR` + `bridge-client.mjs`) for Browser Use cloud where the
+  page cannot reach 127.0.0.1. Embedded (legacy) mode unchanged. Tool count 16 → 19.
+  Full guide: [`docs/SIGNING_PROXY.md`](docs/SIGNING_PROXY.md).
+- **Robinhood Chain support** (chainId 4663): OpenSea/SeaDrop V1
+  (`0x00005EA00Ac477B1030CE78506496e8C2dE24bf5`) verified deployed on-chain; explorer
+  `robinhoodchain.blockscout.com`; RPC via GetBlock/public/sequencer.
+  Listing (Seaport) not yet available on this chain (not deployed).
+  Reference: [`references/robinhood-chain.md`](references/robinhood-chain.md).
+- 9 new unit tests for the proxy path (keyless relay, bridge fallback, server-side
+  `validateTxRequest`) — **52 tests total**, all passing.
+
+### Fixed
+- `MintScheduler` logs now go to **stderr**. Previously `console.log` polluted
+  runner.mjs stdout and corrupted JSON tool output whenever pending scheduled jobs
+  existed on disk.
+- Infura WebSocket endpoint: correct URL is `wss://mainnet.infura.io/ws/v3/<KEY>`
+  (the `/v3/` path answers HTTP 200 instead of a WS upgrade).
+- Signing proxy tunnel handling: cloudflared quick tunnels return 404 from
+  datacenter IPs — the bridge fallback makes the flow egress-independent; tunnel
+  PID is now captured so `stop_signing_proxy` cleans it up.
+
 ## [3.4.0] - 2026-06-22
 
 ### Security

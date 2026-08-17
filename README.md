@@ -43,9 +43,9 @@ multiple RPCs, with automatic replace-by-fee if a transaction misses its block �
 - 📅 **Scheduled drops** — persistent jobs that survive restarts
 - 🌊 **OpenSea/SeaDrop** public minting + read-only discovery
 - 🏷️ **Listing** — EIP-712 signed Seaport orders (after explicit confirmation)
-- 🖥️ **Browser minting** — wallet injection for Connect-Wallet sites
+- 🖥️ **Browser minting** — keyless signing proxy (keys never leave the agent), WebSocket for local browsers + bridge fallback for Browser Use cloud, wallet injection for Connect-Wallet sites
 - 🔌 **MCP server** — typed tools for any MCP host (Claude Desktop/Code, Cursor, custom agents)
-- 🔗 **Multi-chain** — Ethereum, Polygon, Arbitrum, Optimism, Base, Zora, Blast
+- 🔗 **Multi-chain** — Ethereum, Polygon, Arbitrum, Optimism, Base, Zora, Blast, Robinhood Chain
 - 🛡️ **Safety-first** — hardened browser signer (blocks `approval`/`transfer` calls, per-tx value cap, contract allowlist, pinned `ethers` + Subresource Integrity), `MAX_MINT_PRICE_ETH` enforced on **every** mint path, explicit confirmation before signing/broadcasting, untrusted metadata, and **0 known dependency vulnerabilities**
 
 ## Quick start
@@ -184,8 +184,9 @@ A small, non-redundant set — each file has one job:
 | [`SKILL.md`](SKILL.md) | AI agents | **Authoritative** definition: tool schemas, full rules |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Both | Copy-paste command recipes |
 | [`docs/MCP.md`](docs/MCP.md) | Both | MCP server setup & tool/route split |
+| [`docs/SIGNING_PROXY.md`](docs/SIGNING_PROXY.md) | Both | Signing proxy: safe browser minting, bridge flow, troubleshooting |
 | [`SECURITY.md`](SECURITY.md) · [`CHANGELOG.md`](CHANGELOG.md) | Both | Security policy · version history |
-| [`references/`](references/) | Maintainers | Deep-dive operational notes & patterns |
+| [`references/`](references/) | Maintainers | Deep-dive operational notes & patterns (incl. [`references/robinhood-chain.md`](references/robinhood-chain.md)) |
 
 > There are **no per-platform agent files** — `AGENTS.md` + `SKILL.md` work on any host (Hermes, Claude Code, Cursor, custom MCP).
 
@@ -200,6 +201,10 @@ never commit `.env`, and read [`SECURITY.md`](SECURITY.md). Report vulnerabiliti
   typed-data (order) signing by default**. A malicious or compromised mint page can't drain the wallet.
 - **Pinned dependency + SRI** — `ethers` loads from a version-pinned CDN with a Subresource Integrity
   hash, so a tampered CDN file is rejected.
+- **Signing proxy for browser minting** — private keys stay on the agent; the browser only
+  holds a session token + wallet address. Every signing request is re-validated server-side
+  (dangerous-selector blocklist, value cap, contract allowlist, chainId, from-mismatch) before
+  signing. Token is revoked on `stop_signing_proxy`. See [`docs/SIGNING_PROXY.md`](docs/SIGNING_PROXY.md).
 - **`MAX_MINT_PRICE_ETH` enforced everywhere** — the agent/MCP path, `DirectMinter`, and the competitive
   `fast-mint.mjs` (re-checked against the freshest on-chain price right before broadcast).
 - **Safer key generation** — `generate-wallets` never prints keys to stdout, writes `0600` files, and can

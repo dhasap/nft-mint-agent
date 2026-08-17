@@ -172,7 +172,7 @@ node runner.mjs cancel_pending_tx '{"tx_hash":"0x...","wallet_index":0,"gas_bump
 | Low-competition standard `mint(uint256)`/`claim(uint256)` | `mint_nft` |
 | OpenSea/SeaDrop public mint, not competitive | `get_mint_schedule` → `mint_nft` or `schedule_mint` |
 | WL/allowlist/signed mint | Browser/OpenSea flow; proof/signature required |
-| Site requires Connect Wallet/server signature | `browser_mint` fallback |
+| Site requires Connect Wallet/server signature | `browser_mint` (signing:"proxy" — keys stay on agent; embedded = legacy) |
 | Post-mint verification | tx receipt + logs + wallet `balanceOf` + OpenSea asset page |
 
 ## Current OpenSea SeaDrop V1 ABI notes
@@ -205,6 +205,12 @@ Competitive fast mint:
 Scheduled non-competitive mint:
   link → parse/scrape → get_mint_schedule → confirm public stage + qty/wallets/price
   → schedule_mint → list_scheduled_mints → report
+
+Browser mint (Connect Wallet / server-signature, AMAN):
+  start_signing_proxy → browser_mint (signing:"proxy") → inject relay via js()
+  (cloud: bridge loop node bridge-client.mjs; lokal: console → WS langsung)
+  → connect → mint → verifikasi tx → stop_signing_proxy (WAJIB)
+  → diskusi listing
 ```
 
 ## Rules
@@ -225,8 +231,10 @@ Ethereum (1), Polygon (137), Arbitrum (42161), Optimism (10), Base (8453), Robin
 
 - `docs/QUICKSTART.md` — agent cheat sheet (copy-paste recipes)
 - `docs/MCP.md` — MCP server setup and the tool/route split
+- `docs/SIGNING_PROXY.md` — safe browser minting: keyless signing proxy, bridge flow (Browser Use cloud), troubleshooting
 - `references/opensea-current-seadrop-v1.md` — current SeaDrop ABI/address + fast-mint rules
 - `references/opensea-official-skill-lessons.md` — lessons from `ProjectOpenSea/opensea-skill`
+- `references/robinhood-chain.md` — Robinhood Chain (4663): verified SeaDrop/Seaport state, RPCs, fast-mint tuning
 - `references/seadrop-patterns.md`, `references/seadrop-overload-fix.md` — SeaDrop architecture/pitfalls
 - `references/opensea-postmint-verification.md` — verifying minted NFTs
 - `references/typescript-compilation-pitfalls.md` — build pitfalls

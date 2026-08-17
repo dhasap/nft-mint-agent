@@ -11,7 +11,7 @@ The toolkit is intentionally split across three surfaces. Pick the right one per
 
 | Surface | Use it for | Why |
 |---|---|---|
-| **MCP server** (`npm run mcp`) | read / detect / decide / list: `parse_mint_link`, `detect_contract`, `check_wallets`, `get_mint_schedule`, `get_mint_status`, `scrape_contract_from_website`, `get_skill_health`, `mint_nft`, `schedule_mint`, `list_scheduled_mints`, `cancel_scheduled_mint`, `browser_mint`, `cancel_pending_tx`, `approve_seaport`, `list_nft`, `batch_list_nfts` | Typed schemas → the agent can't send wrong args; structured results for reasoning |
+| **MCP server** (`npm run mcp`) | read / detect / decide / list / signing-proxy: `parse_mint_link`, `detect_contract`, `check_wallets`, `get_mint_schedule`, `get_mint_status`, `scrape_contract_from_website`, `get_skill_health`, `mint_nft`, `schedule_mint`, `list_scheduled_mints`, `cancel_scheduled_mint`, `browser_mint`, `cancel_pending_tx`, `approve_seaport`, `list_nft`, `batch_list_nfts`, `start_signing_proxy`, `stop_signing_proxy`, `get_signing_proxy_status` (19 tools) | Typed schemas → the agent can't send wrong args; structured results for reasoning |
 | **CLI `fast-mint.mjs`** | competitive / FCFS / max / hot drops | Zero per-mint LLM/transport latency. Pre-signed, multi-RPC fan-out, RBF |
 | **`SKILL.md` / `AGENTS.md`** | the agent's decision rules | Tells the agent *which* surface to pick |
 

@@ -37,6 +37,18 @@ You'll get an acknowledgement within 72 hours.
   an optional **destination-contract allowlist**, and **disables typed-data (Seaport order / permit)
   signing by default** (enable explicitly with `allowOrderSigning`). This prevents a malicious or
   compromised mint page from draining the wallet.
+- **Signing proxy for browser minting** (`docs/SIGNING_PROXY.md`): the embedded-key browser
+  signer is the **legacy** path. The recommended path is `signing:"proxy"` — private keys stay on
+  the agent machine; the browser only receives a keyless relay script (wallet address + session
+  token + proxy URL). Every signing request is **re-validated on the server** before signing:
+  dangerous-selector blocklist (`setApprovalForAll`, `approve`, `transfer`, `transferFrom`,
+  `safeTransferFrom`, `increaseAllowance`, `permit`), per-tx value cap
+  (`max_tx_value_eth` / `MAX_MINT_PRICE_ETH`), optional destination-contract allowlist, chainId
+  match, and `from`-must-match-relay-wallet. Typed-data/personal signing off by default.
+  The session **token is revoked** when you run `stop_signing_proxy` — always stop it after a mint.
+  For Browser Use cloud (remote browser), the relay falls back to a bridge queue
+  (`window.__signQ`/`__signR`) processed locally via `bridge-client.mjs`; requests never leave
+  the machine except as already-validated signing/read calls.
 - **Pinned dependency + Subresource Integrity**: `ethers` is loaded from a version-pinned CDN with an SRI
   hash, so a tampered/compromised CDN file is rejected by the browser.
 - **Price cap enforced on every mint path**: the agent/MCP tools, `DirectMinter.mint()`, and the
